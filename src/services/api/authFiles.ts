@@ -8,6 +8,18 @@ import type { AuthFilesResponse } from '@/types/authFile';
 export const authFilesApi = {
   list: () => apiClient.get<AuthFilesResponse>('/auth-files'),
 
+  refreshAntigravityQuota: (id: string) =>
+    apiClient.post('/auth-files/antigravity-quota', { id }),
+
+  refreshCodexQuota: (id: string, model?: string) =>
+    apiClient.post('/auth-files/codex-quota', { id, model }),
+
+  listSessionBindings: () =>
+    apiClient.get<{ bindings: { auth_id: string; session_count: number; last_used_at: string }[] }>('/auth-files/session-bindings'),
+
+  setDisabled: (id: string, disabled: boolean) =>
+    apiClient.put('/auth-files/disabled', { id, disabled }),
+
   upload: (file: File) => {
     const formData = new FormData();
     formData.append('file', file, file.name);

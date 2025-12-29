@@ -183,8 +183,74 @@
 .cardHeader {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: $spacing-sm;
   min-height: 28px;
+}
+
+.cardHeaderLeft {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  flex: 1;
+  min-width: 0;
+}
+
+.cardHeaderRight {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.statusIndicator {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.statusActive {
+  color: #10b981;
+}
+
+.statusUnavailable {
+  color: #ef4444;
+}
+
+.statusDisabled {
+  color: #6b7280;
+}
+
+.priorityBadge {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.priorityHigh {
+  background-color: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+}
+
+.priorityMedium {
+  background-color: rgba(59, 130, 246, 0.15);
+  color: #3b82f6;
+}
+
+.priorityLow {
+  background-color: rgba(156, 163, 175, 0.15);
+  color: #6b7280;
+}
+
+.cardUnavailable {
+  opacity: 0.7;
+  border-left: 3px solid #ef4444;
+}
+
+.cardDisabled {
+  opacity: 0.5;
+  border-left: 3px solid #6b7280;
 }
 
 .typeBadge {
@@ -213,6 +279,11 @@
   padding: $spacing-xs 0;
   border-top: 1px solid var(--border-color);
   border-bottom: 1px solid var(--border-color);
+}
+
+.cooldownText {
+  color: #ef4444;
+  font-weight: 600;
 }
 
 .cardStats {
@@ -560,4 +631,29 @@
   border-radius: 8px;
   border: 1px solid var(--danger-color);
   flex-shrink: 0;
+}
+
+.quotaSection {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.quotaHint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.quotaList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quotaActions {
+  display: flex;
+  justify-content: flex-end;
 }

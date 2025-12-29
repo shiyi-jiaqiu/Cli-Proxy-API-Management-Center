@@ -355,7 +355,19 @@
     "models_unsupported": "当前版本不支持此功能",
     "models_unsupported_desc": "请更新 CLI Proxy API 到最新版本后重试",
     "models_excluded_badge": "已排除",
-    "models_excluded_hint": "此模型已被 OAuth 排除"
+    "models_excluded_hint": "此模型已被 OAuth 排除",
+    "refresh_quota": "刷新配额",
+    "refresh_quota_success": "配额已刷新",
+    "quota_primary": "Primary",
+    "quota_secondary": "Secondary",
+    "quota_forbidden": "无权限查询配额 (403)",
+    "quota_empty": "暂无配额数据，点击刷新获取",
+    "codex_quota_empty": "暂无配额数据，点击刷新（会发送一个极小探测请求）",
+    "codex_plan_type": "套餐",
+    "codex_credits_balance": "余额",
+    "sessions": "会话绑定",
+    "cooldown_remaining": "冷却剩余",
+    "status_unavailable_remaining": "冷却中：{{remaining}}"
   },
   "vertex_import": {
     "title": "Vertex JSON 登录",

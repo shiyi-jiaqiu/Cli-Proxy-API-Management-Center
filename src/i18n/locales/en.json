@@ -355,7 +355,19 @@
     "models_unsupported": "This feature is not supported in the current version",
     "models_unsupported_desc": "Please update CLI Proxy API to the latest version and try again",
     "models_excluded_badge": "Excluded",
-    "models_excluded_hint": "This model is excluded by OAuth"
+    "models_excluded_hint": "This model is excluded by OAuth",
+    "refresh_quota": "Refresh quota",
+    "refresh_quota_success": "Quota refreshed",
+    "quota_primary": "Primary",
+    "quota_secondary": "Secondary",
+    "quota_forbidden": "Quota unavailable (403)",
+    "quota_empty": "No quota data. Click refresh.",
+    "codex_quota_empty": "No quota data. Click refresh (uses a tiny probe request).",
+    "codex_plan_type": "Plan",
+    "codex_credits_balance": "Credits balance",
+    "sessions": "Sessions",
+    "cooldown_remaining": "Cooldown",
+    "status_unavailable_remaining": "Cooling down: {{remaining}}"
   },
   "vertex_import": {
     "title": "Vertex JSON Login",

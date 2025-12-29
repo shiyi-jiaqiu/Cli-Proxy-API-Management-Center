@@ -7,13 +7,13 @@ import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { EmptyState } from '@/components/ui/EmptyState';
-import { IconBot, IconDownload, IconInfo, IconTrash2 } from '@/components/ui/icons';
+import { QuotaBar } from '@/components/ui/QuotaBar';
+import { IconBot, IconDownload, IconEye, IconEyeOff, IconInfo, IconTrash2 } from '@/components/ui/icons';
 import { useAuthStore, useNotificationStore, useThemeStore } from '@/stores';
 import { authFilesApi, usageApi } from '@/services/api';
 import { apiClient } from '@/services/api/client';
 import type { AuthFileItem } from '@/types';
-import type { KeyStats, KeyStatBucket, UsageDetail } from '@/utils/usage';
-import { collectUsageDetails, calculateStatusBarData } from '@/utils/usage';
+import type { KeyStats, KeyStatBucket } from '@/utils/usage';
 import { formatFileSize } from '@/utils/format';
 import styles from './AuthFilesPage.module.scss';
 
@@ -89,6 +89,46 @@ function isRuntimeOnlyAuthFile(file: AuthFileItem): boolean {
   return false;
 }
 
+function toLowerString(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value.trim().toLowerCase();
+}
+
+function remainingPercentFromUsedPercent(usedPercent: unknown): number | null {
+  if (typeof usedPercent !== 'number' || !Number.isFinite(usedPercent)) return null;
+  const remaining = Math.round(100 - usedPercent);
+  if (remaining < 0) return 0;
+  if (remaining > 100) return 100;
+  return remaining;
+}
+
+function parseDate(value: unknown): Date | null {
+  if (!value) return null;
+  const d = new Date(String(value));
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function formatCooldownRemainingSeconds(secondsRemaining: number): string {
+  if (!Number.isFinite(secondsRemaining) || secondsRemaining <= 0) return '0m';
+  const minutes = Math.ceil(secondsRemaining / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  if (mins === 0) return `${hours}h`;
+  return `${hours}h${mins}m`;
+}
+
+function formatRelativeTime(secondsAgo: number, isZh: boolean): string {
+  if (!Number.isFinite(secondsAgo) || secondsAgo < 0) secondsAgo = 0;
+  if (secondsAgo < 60) return isZh ? '刚刚' : 'just now';
+  const minutes = Math.floor(secondsAgo / 60);
+  if (minutes < 60) return isZh ? `${minutes}分钟前` : `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return isZh ? `${hours}小时前` : `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return isZh ? `${days}天前` : `${days}d ago`;
+}
+
 // 解析认证文件的统计数据
 function resolveAuthFileStats(
   file: AuthFileItem,
@@ -129,7 +169,7 @@ function resolveAuthFileStats(
 }
 
 export function AuthFilesPage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { showNotification } = useNotificationStore();
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
   const resolvedTheme: ResolvedTheme = useThemeStore((state) => state.resolvedTheme);
@@ -145,7 +185,6 @@ export function AuthFilesPage() {
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deletingAll, setDeletingAll] = useState(false);
   const [keyStats, setKeyStats] = useState<KeyStats>({ bySource: {}, byAuthIndex: {} });
-  const [usageDetails, setUsageDetails] = useState<UsageDetail[]>([]);
 
   // 详情弹窗相关
   const [detailModalOpen, setDetailModalOpen] = useState(false);
@@ -158,6 +197,11 @@ export function AuthFilesPage() {
   const [modelsFileName, setModelsFileName] = useState('');
   const [modelsFileType, setModelsFileType] = useState('');
   const [modelsError, setModelsError] = useState<'unsupported' | null>(null);
+  const [refreshingQuota, setRefreshingQuota] = useState<Record<string, boolean>>({});
+  const [sessionBindings, setSessionBindings] = useState<Record<string, { sessionCount: number; lastUsedAt: string }>>({});
+  const [sessionBindingsLoaded, setSessionBindingsLoaded] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [togglingDisabled, setTogglingDisabled] = useState<Record<string, boolean>>({});
 
   // OAuth 排除模型相关
   const [excluded, setExcluded] = useState<Record<string, string[]>>({});
@@ -199,6 +243,81 @@ export function AuthFilesPage() {
     }
   }, [t]);
 
+  const refreshAntigravityQuota = useCallback(
+    async (item: AuthFileItem) => {
+      // Prefer id (auth.ID) over name (filename) when available
+      // Backend supports both, but id is the canonical identifier
+      const authID = item.id ? String(item.id).trim() : String(item.name || '').trim();
+      if (!authID) return;
+
+      setRefreshingQuota((prev) => ({ ...prev, [authID]: true }));
+      try {
+        const data = await authFilesApi.refreshAntigravityQuota(authID);
+        const updated = data && (data as any).auth ? ((data as any).auth as AuthFileItem) : null;
+
+        if (updated) {
+          setFiles((prev) =>
+            prev.map((f) => {
+              // Match using same logic as authID extraction
+              const fid = f.id ? String(f.id).trim() : String(f.name || '').trim();
+              return fid === authID ? updated : f;
+            })
+          );
+        } else {
+          await loadFiles();
+        }
+
+        showNotification(t('auth_files.refresh_quota_success', { defaultValue: 'Quota refreshed' }), 'success');
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : t('notification.refresh_failed');
+        showNotification(msg, 'error');
+      } finally {
+        setRefreshingQuota((prev) => {
+          const next = { ...prev };
+          delete next[authID];
+          return next;
+        });
+      }
+    },
+    [loadFiles, showNotification, t]
+  );
+
+  const refreshCodexQuota = useCallback(
+    async (item: AuthFileItem) => {
+      const authID = item.id ? String(item.id).trim() : String(item.name || '').trim();
+      if (!authID) return;
+
+      setRefreshingQuota((prev) => ({ ...prev, [authID]: true }));
+      try {
+        const data = await authFilesApi.refreshCodexQuota(authID, 'gpt-5.2');
+        const updated = data && (data as any).auth ? ((data as any).auth as AuthFileItem) : null;
+
+        if (updated) {
+          setFiles((prev) =>
+            prev.map((f) => {
+              const fid = f.id ? String(f.id).trim() : String(f.name || '').trim();
+              return fid === authID ? updated : f;
+            })
+          );
+        } else {
+          await loadFiles();
+        }
+
+        showNotification(t('auth_files.refresh_quota_success', { defaultValue: 'Quota refreshed' }), 'success');
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : t('notification.refresh_failed');
+        showNotification(msg, 'error');
+      } finally {
+        setRefreshingQuota((prev) => {
+          const next = { ...prev };
+          delete next[authID];
+          return next;
+        });
+      }
+    },
+    [loadFiles, showNotification, t]
+  );
+
   // 加载 key 统计和 usage 明细（API 层已有60秒超时）
   const loadKeyStats = useCallback(async () => {
     // 防止重复请求
@@ -209,13 +328,29 @@ export function AuthFilesPage() {
       const usageData = usageResponse?.usage ?? usageResponse;
       const stats = await usageApi.getKeyStats(usageData);
       setKeyStats(stats);
-      // 收集 usage 明细用于状态栏
-      const details = collectUsageDetails(usageData);
-      setUsageDetails(details);
     } catch {
       // 静默失败
     } finally {
       loadingKeyStatsRef.current = false;
+    }
+  }, []);
+
+  const loadSessionBindings = useCallback(async () => {
+    try {
+      const res = await authFilesApi.listSessionBindings();
+      const bindings = res?.bindings ?? [];
+      const next: Record<string, { sessionCount: number; lastUsedAt: string }> = {};
+      for (const b of bindings) {
+        if (!b?.auth_id) continue;
+        next[b.auth_id] = {
+          sessionCount: Number(b.session_count) || 0,
+          lastUsedAt: String(b.last_used_at || '')
+        };
+      }
+      setSessionBindings(next);
+      setSessionBindingsLoaded(true);
+    } catch {
+      // Silently ignore
     }
   }, []);
 
@@ -245,14 +380,74 @@ export function AuthFilesPage() {
     }
   }, [showNotification, t]);
 
+  // Auto-refresh Antigravity quotas when files are loaded
+  const autoRefreshAntigravityQuotas = useCallback(
+    async (authFiles: AuthFileItem[]) => {
+      const antigravityFiles = authFiles.filter(
+        (f) => toLowerString(f.provider || f.type) === 'antigravity' && !isRuntimeOnlyAuthFile(f)
+      );
+      if (antigravityFiles.length === 0) return;
+
+      // Refresh quotas in parallel (limit concurrency to 3)
+      const batchSize = 3;
+      for (let i = 0; i < antigravityFiles.length; i += batchSize) {
+        const batch = antigravityFiles.slice(i, i + batchSize);
+        await Promise.allSettled(
+          batch.map(async (item) => {
+            const authID = item.id ? String(item.id).trim() : String(item.name || '').trim();
+            if (!authID) return;
+
+            // Skip if already has quota data
+            if (item.antigravity_quota?.models && item.antigravity_quota.models.length > 0) {
+              return;
+            }
+
+            try {
+              const data = await authFilesApi.refreshAntigravityQuota(authID);
+              const updated = data && (data as any).auth ? ((data as any).auth as AuthFileItem) : null;
+              if (updated) {
+                setFiles((prev) =>
+                  prev.map((f) => {
+                    const fid = f.id ? String(f.id).trim() : String(f.name || '').trim();
+                    return fid === authID ? updated : f;
+                  })
+                );
+              }
+            } catch {
+              // Silently ignore errors during auto-refresh
+            }
+          })
+        );
+      }
+    },
+    []
+  );
+
   useEffect(() => {
-    loadFiles();
-    loadKeyStats();
-    loadExcluded();
-  }, [loadFiles, loadKeyStats, loadExcluded]);
+    const initPage = async () => {
+      await loadFiles();
+      loadKeyStats();
+      loadExcluded();
+      loadSessionBindings();
+    };
+    initPage();
+  }, [loadFiles, loadKeyStats, loadExcluded, loadSessionBindings]);
+
+  // Auto-refresh Antigravity quotas after files are loaded
+  useEffect(() => {
+    if (files.length > 0 && !loading) {
+      autoRefreshAntigravityQuotas(files);
+    }
+    // Only run when files change (after initial load or refresh)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [files.length, loading]);
 
   // 定时刷新状态数据（每240秒）
   useInterval(loadKeyStats, 240_000);
+  // 定时刷新绑定状态（每10秒）
+  useInterval(loadSessionBindings, 10_000);
+  // Cooldown countdown ticker
+  useInterval(() => setNowMs(Date.now()), 5_000);
 
   // 提取所有存在的类型
   const existingTypes = useMemo(() => {
@@ -587,90 +782,129 @@ export function AuthFilesPage() {
     </div>
   );
 
-  // 预计算所有认证文件的状态栏数据（避免每次渲染重复计算）
-  const statusBarCache = useMemo(() => {
-    const cache = new Map<string, ReturnType<typeof calculateStatusBarData>>();
-
-    files.forEach((file) => {
-      const rawAuthIndex = file['auth_index'] ?? file.authIndex;
-      const authIndexKey = normalizeAuthIndexValue(rawAuthIndex);
-
-      if (authIndexKey) {
-        // 过滤出属于该认证文件的 usage 明细
-        const filteredDetails = usageDetails.filter((detail) => {
-          const detailAuthIndex = normalizeAuthIndexValue(detail.auth_index);
-          return detailAuthIndex !== null && detailAuthIndex === authIndexKey;
-        });
-        cache.set(authIndexKey, calculateStatusBarData(filteredDetails));
-      }
-    });
-
-    return cache;
-  }, [usageDetails, files]);
-
-  // 渲染状态监测栏
-  const renderStatusBar = (item: AuthFileItem) => {
-    // 认证文件使用 authIndex 来匹配 usage 数据
-    const rawAuthIndex = item['auth_index'] ?? item.authIndex;
-    const authIndexKey = normalizeAuthIndexValue(rawAuthIndex);
-
-    const statusData = (authIndexKey && statusBarCache.get(authIndexKey)) || calculateStatusBarData([]);
-    const hasData = statusData.totalSuccess + statusData.totalFailure > 0;
-    const rateClass = !hasData
-      ? ''
-      : statusData.successRate >= 90
-        ? styles.statusRateHigh
-        : statusData.successRate >= 50
-          ? styles.statusRateMedium
-          : styles.statusRateLow;
-
-    return (
-      <div className={styles.statusBar}>
-        <div className={styles.statusBlocks}>
-          {statusData.blocks.map((state, idx) => {
-            const blockClass =
-              state === 'success'
-                ? styles.statusBlockSuccess
-                : state === 'failure'
-                  ? styles.statusBlockFailure
-                  : state === 'mixed'
-                    ? styles.statusBlockMixed
-                    : styles.statusBlockIdle;
-            return <div key={idx} className={`${styles.statusBlock} ${blockClass}`} />;
-          })}
-        </div>
-        <span className={`${styles.statusRate} ${rateClass}`}>
-          {hasData ? `${statusData.successRate.toFixed(1)}%` : '--'}
-        </span>
-      </div>
-    );
-  };
-
   // 渲染单个认证文件卡片
   const renderFileCard = (item: AuthFileItem) => {
-      const fileStats = resolveAuthFileStats(item, keyStats);
+    const fileStats = resolveAuthFileStats(item, keyStats);
     const isRuntimeOnly = isRuntimeOnlyAuthFile(item);
     const typeColor = getTypeColor(item.type || 'unknown');
+    const provider = toLowerString(item.provider || item.type);
+    const authID = String(item.id || item.name || '').trim();
+    const authIDOnly = item.id ? String(item.id).trim() : '';
+    const bindingInfo = authIDOnly ? sessionBindings[authIDOnly] : undefined;
+
+    // Priority and status helpers
+    const priority = (item as any).priority as number | undefined;
+    const effectivePriority = typeof priority === 'number' && Number.isFinite(priority) ? priority : 50;
+    const cooldownUntil = parseDate(item.quota?.next_recover_at);
+    const cooldownSecondsRemaining =
+      cooldownUntil && cooldownUntil.getTime() > nowMs ? Math.ceil((cooldownUntil.getTime() - nowMs) / 1000) : 0;
+    const isCoolingDown = cooldownSecondsRemaining > 0 && (item.quota?.exceeded === true || (item as any).unavailable === true);
+    const isUnavailable = (item as any).unavailable === true || isCoolingDown;
+    const isDisabled = (item as any).disabled === true;
+    const isZh = (i18n?.language || '').toLowerCase().startsWith('zh');
+
+    const bindingCount = bindingInfo?.sessionCount ?? 0;
+    const lastUsed = bindingInfo?.lastUsedAt ? parseDate(bindingInfo.lastUsedAt) : null;
+    const lastUsedAgeSec = lastUsed ? Math.max(0, Math.floor((nowMs - lastUsed.getTime()) / 1000)) : null;
+    const lastUsedText = lastUsedAgeSec === null ? '' : formatRelativeTime(lastUsedAgeSec, isZh);
+    const cooldownReason = item.quota?.reason ? ` (${item.quota.reason})` : '';
+
+    const getPriorityBadge = () => {
+      const isHighPriority = effectivePriority < 20;
+      const isMediumPriority = effectivePriority >= 20 && effectivePriority < 50;
+      return (
+        <span
+          className={`${styles.priorityBadge} ${isHighPriority ? styles.priorityHigh : isMediumPriority ? styles.priorityMedium : styles.priorityLow}`}
+          title={t('auth_files.priority_tooltip', { defaultValue: `Priority: ${effectivePriority} (lower = higher priority)` })}
+        >
+          P:{effectivePriority}
+        </span>
+      );
+    };
+
+    const getStatusIndicator = () => {
+      if (isDisabled) {
+        return <span className={`${styles.statusIndicator} ${styles.statusDisabled}`} title={t('auth_files.status_disabled', { defaultValue: 'Disabled' })}>⚫</span>;
+      }
+      if (isUnavailable) {
+        const remaining = isCoolingDown ? formatCooldownRemainingSeconds(cooldownSecondsRemaining) : '';
+        const reason = item.quota?.reason ? ` (${item.quota.reason})` : '';
+        const title = remaining
+          ? t('auth_files.status_unavailable_remaining', { defaultValue: `Cooling down: ${remaining}${reason}`, remaining })
+          : t('auth_files.status_unavailable', { defaultValue: 'Unavailable (cooling down)' });
+        return <span className={`${styles.statusIndicator} ${styles.statusUnavailable}`} title={title}>🔴</span>;
+      }
+      return <span className={`${styles.statusIndicator} ${styles.statusActive}`} title={t('auth_files.status_active', { defaultValue: 'Active' })}>🟢</span>;
+    };
+
+    const toggleDisabled = async () => {
+      const id = authIDOnly;
+      if (!id) return;
+
+      setTogglingDisabled((prev) => ({ ...prev, [id]: true }));
+      try {
+        const data = await authFilesApi.setDisabled(id, !isDisabled);
+        const updated = data && (data as any).auth ? ((data as any).auth as AuthFileItem) : null;
+
+        if (updated) {
+          setFiles((prev) => prev.map((f) => (String(f.id || '').trim() === id ? updated : f)));
+        } else {
+          await loadFiles();
+        }
+
+        showNotification(
+          !isDisabled
+            ? t('auth_files.disabled_success', { defaultValue: 'Disabled' })
+            : t('auth_files.enabled_success', { defaultValue: 'Enabled' }),
+          'success'
+        );
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : t('notification.refresh_failed');
+        showNotification(msg, 'error');
+      } finally {
+        setTogglingDisabled((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+      }
+    };
 
     return (
-      <div key={item.name} className={styles.fileCard}>
+      <div key={item.name} className={`${styles.fileCard} ${isUnavailable ? styles.cardUnavailable : ''} ${isDisabled ? styles.cardDisabled : ''}`}>
         <div className={styles.cardHeader}>
-          <span
-            className={styles.typeBadge}
-            style={{
-              backgroundColor: typeColor.bg,
-              color: typeColor.text,
-              ...(typeColor.border ? { border: typeColor.border } : {})
-            }}
-          >
-            {getTypeLabel(item.type || 'unknown')}
-          </span>
-          <span className={styles.fileName}>{item.name}</span>
+          <div className={styles.cardHeaderLeft}>
+            <span
+              className={styles.typeBadge}
+              style={{
+                backgroundColor: typeColor.bg,
+                color: typeColor.text,
+                ...(typeColor.border ? { border: typeColor.border } : {})
+              }}
+            >
+              {getTypeLabel(item.type || 'unknown')}
+            </span>
+            <span className={styles.fileName}>{item.name}</span>
+          </div>
+          <div className={styles.cardHeaderRight}>
+            {getStatusIndicator()}
+            {getPriorityBadge()}
+          </div>
         </div>
 
         <div className={styles.cardMeta}>
           <span>{t('auth_files.file_size')}: {item.size ? formatFileSize(item.size) : '-'}</span>
           <span>{t('auth_files.file_modified')}: {formatModified(item)}</span>
+          {sessionBindingsLoaded && authIDOnly ? (
+            <span title={lastUsedText ? t('auth_files.sessions_last_used_relative', { defaultValue: `Last used: ${lastUsedText}` }) : undefined}>
+              {t('auth_files.sessions', { defaultValue: 'Sessions' })}: {bindingCount}{lastUsedText ? ` · ${lastUsedText}` : ''}
+            </span>
+          ) : null}
+          {isCoolingDown ? (
+            <span className={styles.cooldownText}>
+              {t('auth_files.cooldown_remaining', { defaultValue: 'Cooldown' })}: {formatCooldownRemainingSeconds(cooldownSecondsRemaining)}{cooldownReason}
+            </span>
+          ) : null}
         </div>
 
         <div className={styles.cardStats}>
@@ -682,12 +916,110 @@ export function AuthFilesPage() {
           </span>
         </div>
 
-        {/* 状态监测栏 */}
-        {renderStatusBar(item)}
+        {/* Quota */}
+        {provider === 'codex' ? (
+          <div className={styles.quotaSection}>
+            {item.codex_quota ? (
+              <>
+                {item.codex_quota.plan_type ? (
+                  <div className={styles.quotaHint}>
+                    {t('auth_files.codex_plan_type', { defaultValue: 'Plan' })}: {String(item.codex_quota.plan_type)}
+                  </div>
+                ) : null}
+                <QuotaBar
+                  label={t('auth_files.quota_primary', { defaultValue: 'Primary' })}
+                  percent={remainingPercentFromUsedPercent(item.codex_quota.primary_used_percent)}
+                  resetSeconds={item.codex_quota.primary_reset_after_seconds ?? null}
+                />
+                <QuotaBar
+                  label={t('auth_files.quota_secondary', { defaultValue: 'Secondary' })}
+                  percent={remainingPercentFromUsedPercent(item.codex_quota.secondary_used_percent)}
+                  resetSeconds={item.codex_quota.secondary_reset_after_seconds ?? null}
+                />
+                {item.codex_quota.credits_balance ? (
+                  <div className={styles.quotaHint}>
+                    {t('auth_files.codex_credits_balance', { defaultValue: 'Credits balance' })}: {String(item.codex_quota.credits_balance)}
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <div className={styles.quotaHint}>
+                {t('auth_files.codex_quota_empty', { defaultValue: 'No quota data. Click refresh (uses a tiny probe request).' })}
+              </div>
+            )}
+
+            <div className={styles.quotaActions}>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => refreshCodexQuota(item)}
+                disabled={disableControls || !authID || isRuntimeOnly}
+                loading={!!refreshingQuota[authID]}
+              >
+                {t('auth_files.refresh_quota', { defaultValue: 'Refresh quota' })}
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
+        {provider === 'antigravity' ? (
+          <div className={styles.quotaSection}>
+            {item.antigravity_quota?.forbidden ? (
+              <div className={styles.quotaHint}>
+                {t('auth_files.quota_forbidden', { defaultValue: 'Quota unavailable (403)' })}
+              </div>
+            ) : null}
+
+            {(() => {
+              const models = item.antigravity_quota?.models ?? [];
+              return models.length > 0 ? (
+                <div className={styles.quotaList}>
+                  {models.map((m) => (
+                    <QuotaBar
+                      key={m.name}
+                      label={m.name}
+                      percent={m.remaining_percent ?? null}
+                      resetTime={m.reset_time ?? null}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className={styles.quotaHint}>
+                  {t('auth_files.quota_empty', { defaultValue: 'No quota data. Click refresh.' })}
+                </div>
+              );
+            })()}
+
+            <div className={styles.quotaActions}>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => refreshAntigravityQuota(item)}
+                disabled={disableControls || !authID || isRuntimeOnly}
+                loading={!!refreshingQuota[authID]}
+              >
+                {t('auth_files.refresh_quota', { defaultValue: 'Refresh quota' })}
+              </Button>
+            </div>
+          </div>
+        ) : null}
 
         <div className={styles.cardActions}>
           {isRuntimeOnly ? (
-            <div className={styles.virtualBadge}>{t('auth_files.type_virtual') || '虚拟认证文件'}</div>
+            <>
+              <div className={styles.virtualBadge}>{t('auth_files.type_virtual') || '虚拟认证文件'}</div>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={toggleDisabled}
+                className={styles.iconButton}
+                title={isDisabled ? t('auth_files.enable_button', { defaultValue: 'Enable' }) : t('auth_files.disable_button', { defaultValue: 'Disable' })}
+                disabled={disableControls || !authIDOnly || !!togglingDisabled[authIDOnly]}
+                loading={!!togglingDisabled[authIDOnly]}
+              >
+                {isDisabled ? <IconEye className={styles.actionIcon} size={16} /> : <IconEyeOff className={styles.actionIcon} size={16} />}
+              </Button>
+            </>
           ) : (
             <>
               <Button
@@ -709,6 +1041,17 @@ export function AuthFilesPage() {
                 disabled={disableControls}
               >
                 <IconInfo className={styles.actionIcon} size={16} />
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={toggleDisabled}
+                className={styles.iconButton}
+                title={isDisabled ? t('auth_files.enable_button', { defaultValue: 'Enable' }) : t('auth_files.disable_button', { defaultValue: 'Disable' })}
+                disabled={disableControls || !authIDOnly || !!togglingDisabled[authIDOnly]}
+                loading={!!togglingDisabled[authIDOnly]}
+              >
+                {isDisabled ? <IconEye className={styles.actionIcon} size={16} /> : <IconEyeOff className={styles.actionIcon} size={16} />}
               </Button>
               <Button
                 variant="secondary"
