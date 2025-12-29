@@ -369,6 +369,18 @@
     "cooldown_remaining": "冷却剩余",
     "status_unavailable_remaining": "冷却中：{{remaining}}"
   },
+  "antigravity_quota": {
+    "title": "Antigravity 额度",
+    "empty_title": "暂无 Antigravity 认证",
+    "empty_desc": "上传 Antigravity 认证文件后即可查看额度。",
+    "idle": "尚未加载额度，请点击刷新按钮。",
+    "loading": "正在加载额度...",
+    "load_failed": "额度获取失败：{{message}}",
+    "missing_auth_index": "认证文件缺少 auth_index",
+    "empty_models": "暂无额度数据",
+    "refresh_button": "刷新额度",
+    "fetch_all": "获取全部"
+  },
   "vertex_import": {
     "title": "Vertex JSON 登录",
     "description": "上传 Google 服务账号 JSON，使用 CLI vertex-import 同步规则写入 auth-dir/vertex-<project>.json。",
@@ -616,8 +628,6 @@
     "request_log_download_title": "下载报文",
     "request_log_download_confirm": "是否要下载id为{{id}}的报文？",
     "request_log_download_success": "报文下载成功",
-    "action_hint": "双击日志行可复制原文，长按带有请求 ID 的日志可下载报文。",
-    "action_hint_disabled": "双击日志行可复制原文，启用请求日志后可长按带请求 ID 的日志下载报文。",
     "empty_title": "暂无日志记录",
     "empty_desc": "当启用\"日志记录到文件\"功能后，日志将显示在这里",
     "log_content": "日志内容",

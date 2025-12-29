@@ -369,6 +369,18 @@
     "cooldown_remaining": "Cooldown",
     "status_unavailable_remaining": "Cooling down: {{remaining}}"
   },
+  "antigravity_quota": {
+    "title": "Antigravity Quota",
+    "empty_title": "No Antigravity Auth Files",
+    "empty_desc": "Upload an Antigravity credential to view remaining quota.",
+    "idle": "Not loaded. Click Refresh Button.",
+    "loading": "Loading quota...",
+    "load_failed": "Failed to load quota: {{message}}",
+    "missing_auth_index": "Auth file missing auth_index",
+    "empty_models": "No quota data available",
+    "refresh_button": "Refresh Quota",
+    "fetch_all": "Fetch All"
+  },
   "vertex_import": {
     "title": "Vertex JSON Login",
     "description": "Upload a Google service account JSON to store it as auth-dir/vertex-<project>.json using the same rules as the CLI vertex-import helper.",
@@ -616,8 +628,6 @@
     "request_log_download_title": "Download Request Log",
     "request_log_download_confirm": "Download request log for ID {{id}}?",
     "request_log_download_success": "Request log downloaded successfully",
-    "action_hint": "Double-click a log line to copy the raw text. Long-press a line with a request ID to download the request log.",
-    "action_hint_disabled": "Double-click a log line to copy the raw text. Enable request logging to long-press a line with a request ID and download the request log.",
     "empty_title": "No Logs Available",
     "empty_desc": "When \"Enable logging to file\" is enabled, logs will be displayed here",
     "log_content": "Log Content",

@@ -162,6 +162,188 @@
   }
 }
 
+.antigravityGrid {
+  display: grid;
+  gap: $spacing-md;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+
+  @include tablet {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+.antigravityControls {
+  display: flex;
+  gap: $spacing-md;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin-bottom: $spacing-md;
+}
+
+.antigravityControl {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+}
+
+.antigravityCard {
+  background-image: linear-gradient(
+    180deg,
+    rgba(224, 247, 250, 0.12),
+    rgba(224, 247, 250, 0)
+  );
+}
+
+.quotaSection {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+  padding-top: $spacing-sm;
+  margin-top: $spacing-xs;
+  border-top: 1px dashed var(--border-color);
+}
+
+.codexQuotaSection {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+  padding-top: $spacing-sm;
+  margin-top: $spacing-xs;
+  border-top: 1px dashed var(--border-color);
+}
+
+.codexQuotaHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-sm;
+}
+
+.codexQuotaTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.codexQuotaBars {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+}
+
+.codexCredits {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.quotaRow {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+}
+
+.quotaRowHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-sm;
+  min-width: 0;
+
+  @include mobile {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+.quotaModel {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+
+  @include mobile {
+    white-space: normal;
+  }
+}
+
+.quotaBar {
+  height: 8px;
+  background-color: var(--bg-tertiary);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.quotaBarFill {
+  height: 100%;
+  background-color: var(--success-color, #22c55e);
+  transition: width 0.2s ease;
+}
+
+.quotaBarFillHigh {
+  background-color: var(--success-color, #22c55e);
+}
+
+.quotaBarFillMedium {
+  background-color: var(--warning-color, #f59e0b);
+}
+
+.quotaBarFillLow {
+  background-color: var(--danger-color, #ef4444);
+}
+
+.quotaMeta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+
+  @include mobile {
+    justify-content: flex-start;
+  }
+}
+
+.quotaPercent {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.quotaReset {
+  color: var(--text-tertiary);
+}
+
+.quotaMessage {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  text-align: center;
+  padding: $spacing-sm 0;
+}
+
+.quotaError {
+  font-size: 12px;
+  color: var(--danger-color);
+  background-color: rgba(239, 68, 68, 0.08);
+  border: 1px solid var(--danger-color);
+  border-radius: $radius-sm;
+  padding: $spacing-xs $spacing-sm;
+}
+
 // 单个认证文件卡片
 .fileCard {
   background-color: var(--bg-primary);
@@ -241,6 +423,16 @@
 .priorityLow {
   background-color: rgba(156, 163, 175, 0.15);
   color: #6b7280;
+}
+
+.sessionBadge {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  background-color: rgba(59, 130, 246, 0.12);
+  color: var(--text-secondary);
 }
 
 .cardUnavailable {
@@ -491,6 +683,60 @@
   display: flex;
   gap: $spacing-xs;
   flex-shrink: 0;
+}
+
+// OAuth 排除列表表单：提供商快捷标签
+.providerField {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+
+  :global(.form-group) {
+    margin-bottom: 0;
+  }
+}
+
+.providerTagList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $spacing-xs;
+}
+
+.providerTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: $radius-full;
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all $transition-fast;
+
+  &:hover {
+    border-color: var(--primary-color);
+    color: var(--text-primary);
+    background-color: var(--bg-hover);
+  }
+
+  &:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+}
+
+.providerTagActive {
+  background-color: var(--primary-color);
+  border-color: var(--primary-color);
+  color: #fff;
+
+  &:hover {
+    background-color: var(--primary-color);
+    border-color: var(--primary-color);
+    color: #fff;
+  }
 }
 
 // 详情弹窗

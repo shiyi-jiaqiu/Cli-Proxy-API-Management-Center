@@ -8,12 +8,13 @@ import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { QuotaBar } from '@/components/ui/QuotaBar';
-import { IconBot, IconDownload, IconEye, IconEyeOff, IconInfo, IconTrash2 } from '@/components/ui/icons';
+import { IconBot, IconDownload, IconInfo, IconTrash2 } from '@/components/ui/icons';
 import { useAuthStore, useNotificationStore, useThemeStore } from '@/stores';
-import { authFilesApi, usageApi } from '@/services/api';
+import { apiCallApi, authFilesApi, getApiCallErrorMessage, usageApi } from '@/services/api';
 import { apiClient } from '@/services/api/client';
 import type { AuthFileItem } from '@/types';
-import type { KeyStats, KeyStatBucket } from '@/utils/usage';
+import type { KeyStats, KeyStatBucket, UsageDetail } from '@/utils/usage';
+import { collectUsageDetails, calculateStatusBarData } from '@/utils/usage';
 import { formatFileSize } from '@/utils/format';
 import styles from './AuthFilesPage.module.scss';
 
@@ -65,10 +66,120 @@ const TYPE_COLORS: Record<string, TypeColorSet> = {
   }
 };
 
+const OAUTH_PROVIDER_PRESETS = [
+  'gemini',
+  'gemini-cli',
+  'vertex',
+  'aistudio',
+  'antigravity',
+  'claude',
+  'codex',
+  'qwen',
+  'iflow'
+];
+
+const OAUTH_PROVIDER_EXCLUDES = new Set(['all', 'unknown', 'empty']);
+
 interface ExcludedFormState {
   provider: string;
   modelsText: string;
 }
+
+interface AntigravityQuotaGroup {
+  id: string;
+  label: string;
+  models: string[];
+  remainingFraction: number;
+  resetTime?: string;
+}
+
+interface AntigravityQuotaState {
+  status: 'idle' | 'loading' | 'success' | 'error';
+  groups: AntigravityQuotaGroup[];
+  error?: string;
+}
+
+interface SessionBindingEntry {
+  auth_id: string;
+  session_count: number;
+  last_used_at: string;
+}
+
+interface AntigravityQuotaInfo {
+  displayName?: string;
+  quotaInfo?: {
+    remainingFraction?: number | string;
+    remaining_fraction?: number | string;
+    remaining?: number | string;
+    resetTime?: string;
+    reset_time?: string;
+  };
+  quota_info?: {
+    remainingFraction?: number | string;
+    remaining_fraction?: number | string;
+    remaining?: number | string;
+    resetTime?: string;
+    reset_time?: string;
+  };
+}
+
+type AntigravityModelsPayload = Record<string, AntigravityQuotaInfo>;
+
+interface AntigravityQuotaGroupDefinition {
+  id: string;
+  label: string;
+  identifiers: string[];
+  labelFromModel?: boolean;
+}
+
+const ANTIGRAVITY_QUOTA_URLS = [
+  'https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels',
+  'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels',
+  'https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels'
+];
+
+const ANTIGRAVITY_REQUEST_HEADERS = {
+  Authorization: 'Bearer $TOKEN$',
+  'Content-Type': 'application/json',
+  'User-Agent': 'antigravity/1.11.5 windows/amd64'
+};
+
+const ANTIGRAVITY_QUOTA_GROUPS: AntigravityQuotaGroupDefinition[] = [
+  {
+    id: 'claude-gpt',
+    label: 'Claude/GPT',
+    identifiers: [
+      'claude-sonnet-4-5-thinking',
+      'claude-opus-4-5-thinking',
+      'claude-sonnet-4-5',
+      'gpt-oss-120b-medium'
+    ]
+  },
+  {
+    id: 'gemini',
+    label: 'Gemini',
+    identifiers: [
+      'gemini-3-pro-high',
+      'gemini-3-pro-low',
+      'gemini-2.5-flash',
+      'gemini-2.5-flash-lite',
+      'rev19-uic3-1p'
+    ]
+  },
+  {
+    id: 'gemini-3-flash',
+    label: 'Gemini 3 Flash',
+    identifiers: ['gemini-3-flash']
+  },
+  {
+    id: 'gemini-image',
+    label: 'gemini-3-pro-image',
+    identifiers: ['gemini-3-pro-image'],
+    labelFromModel: true
+  }
+];
+
+
 
 // 标准化 auth_index 值（与 usage.ts 中的 normalizeAuthIndex 保持一致）
 function normalizeAuthIndexValue(value: unknown): string | null {
@@ -82,51 +193,160 @@ function normalizeAuthIndexValue(value: unknown): string | null {
   return null;
 }
 
+function parseAntigravityPayload(payload: unknown): Record<string, unknown> | null {
+  if (payload === undefined || payload === null) return null;
+  if (typeof payload === 'string') {
+    const trimmed = payload.trim();
+    if (!trimmed) return null;
+    try {
+      return JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+  if (typeof payload === 'object') {
+    return payload as Record<string, unknown>;
+  }
+  return null;
+}
+
+function getAntigravityQuotaInfo(entry?: AntigravityQuotaInfo): {
+  remainingFraction: number | null;
+  resetTime?: string;
+  displayName?: string;
+} {
+  if (!entry) {
+    return { remainingFraction: null };
+  }
+  const quotaInfo = entry.quotaInfo ?? entry.quota_info ?? {};
+  const remainingValue =
+    quotaInfo.remainingFraction ?? quotaInfo.remaining_fraction ?? quotaInfo.remaining;
+  const remainingFraction = Number(remainingValue);
+  const resetValue = quotaInfo.resetTime ?? quotaInfo.reset_time;
+  const resetTime = typeof resetValue === 'string' ? resetValue : undefined;
+  const displayName = typeof entry.displayName === 'string' ? entry.displayName : undefined;
+
+  return {
+    remainingFraction: Number.isFinite(remainingFraction) ? remainingFraction : null,
+    resetTime,
+    displayName
+  };
+}
+
+function findAntigravityModel(
+  models: AntigravityModelsPayload,
+  identifier: string
+): { id: string; entry: AntigravityQuotaInfo } | null {
+  const direct = models[identifier];
+  if (direct) {
+    return { id: identifier, entry: direct };
+  }
+
+  const match = Object.entries(models).find(([, entry]) => {
+    const name = typeof entry?.displayName === 'string' ? entry.displayName : '';
+    return name.toLowerCase() === identifier.toLowerCase();
+  });
+  if (match) {
+    return { id: match[0], entry: match[1] };
+  }
+
+  return null;
+}
+
+function buildAntigravityQuotaGroups(models: AntigravityModelsPayload): AntigravityQuotaGroup[] {
+  const groups: AntigravityQuotaGroup[] = [];
+  let geminiResetTime: string | undefined;
+  const [claudeDef, geminiDef, flashDef, imageDef] = ANTIGRAVITY_QUOTA_GROUPS;
+
+  const buildGroup = (
+    def: AntigravityQuotaGroupDefinition,
+    overrideResetTime?: string
+  ): AntigravityQuotaGroup | null => {
+    const matches = def.identifiers
+      .map((identifier) => findAntigravityModel(models, identifier))
+      .filter((entry): entry is { id: string; entry: AntigravityQuotaInfo } => Boolean(entry));
+
+    const quotaEntries = matches
+      .map(({ id, entry }) => {
+        const info = getAntigravityQuotaInfo(entry);
+        if (info.remainingFraction === null) return null;
+        return {
+          id,
+          remainingFraction: info.remainingFraction,
+          resetTime: info.resetTime,
+          displayName: info.displayName
+        };
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+
+    if (quotaEntries.length === 0) return null;
+
+    const remainingFraction = Math.min(...quotaEntries.map((entry) => entry.remainingFraction));
+    const resetTime =
+      overrideResetTime ?? quotaEntries.map((entry) => entry.resetTime).find(Boolean);
+    const displayName = quotaEntries.map((entry) => entry.displayName).find(Boolean);
+    const label = def.labelFromModel && displayName ? displayName : def.label;
+
+    return {
+      id: def.id,
+      label,
+      models: quotaEntries.map((entry) => entry.id),
+      remainingFraction,
+      resetTime
+    };
+  };
+
+  const claudeGroup = buildGroup(claudeDef);
+  if (claudeGroup) {
+    groups.push(claudeGroup);
+  }
+
+  const geminiGroup = buildGroup(geminiDef);
+  if (geminiGroup) {
+    geminiResetTime = geminiGroup.resetTime;
+    groups.push(geminiGroup);
+  }
+
+  const flashGroup = buildGroup(flashDef);
+  if (flashGroup) {
+    groups.push(flashGroup);
+  }
+
+  const imageGroup = buildGroup(imageDef, geminiResetTime);
+  if (imageGroup) {
+    groups.push(imageGroup);
+  }
+
+  return groups;
+}
+
+function formatQuotaResetTime(value?: string): string {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  return date.toLocaleString(undefined, {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  });
+}
+
+function resolveAuthProvider(file: AuthFileItem): string {
+  const raw = file.provider ?? file.type ?? '';
+  return String(raw).trim().toLowerCase();
+}
+
+function isAntigravityFile(file: AuthFileItem): boolean {
+  return resolveAuthProvider(file) === 'antigravity';
+}
+
 function isRuntimeOnlyAuthFile(file: AuthFileItem): boolean {
   const raw = file['runtime_only'] ?? file.runtimeOnly;
   if (typeof raw === 'boolean') return raw;
   if (typeof raw === 'string') return raw.trim().toLowerCase() === 'true';
   return false;
-}
-
-function toLowerString(value: unknown): string {
-  if (typeof value !== 'string') return '';
-  return value.trim().toLowerCase();
-}
-
-function remainingPercentFromUsedPercent(usedPercent: unknown): number | null {
-  if (typeof usedPercent !== 'number' || !Number.isFinite(usedPercent)) return null;
-  const remaining = Math.round(100 - usedPercent);
-  if (remaining < 0) return 0;
-  if (remaining > 100) return 100;
-  return remaining;
-}
-
-function parseDate(value: unknown): Date | null {
-  if (!value) return null;
-  const d = new Date(String(value));
-  return Number.isNaN(d.getTime()) ? null : d;
-}
-
-function formatCooldownRemainingSeconds(secondsRemaining: number): string {
-  if (!Number.isFinite(secondsRemaining) || secondsRemaining <= 0) return '0m';
-  const minutes = Math.ceil(secondsRemaining / 60);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  const mins = minutes % 60;
-  if (mins === 0) return `${hours}h`;
-  return `${hours}h${mins}m`;
-}
-
-function formatRelativeTime(secondsAgo: number, isZh: boolean): string {
-  if (!Number.isFinite(secondsAgo) || secondsAgo < 0) secondsAgo = 0;
-  if (secondsAgo < 60) return isZh ? '刚刚' : 'just now';
-  const minutes = Math.floor(secondsAgo / 60);
-  if (minutes < 60) return isZh ? `${minutes}分钟前` : `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return isZh ? `${hours}小时前` : `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return isZh ? `${days}天前` : `${days}d ago`;
 }
 
 // 解析认证文件的统计数据
@@ -169,7 +389,7 @@ function resolveAuthFileStats(
 }
 
 export function AuthFilesPage() {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { showNotification } = useNotificationStore();
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
   const resolvedTheme: ResolvedTheme = useThemeStore((state) => state.resolvedTheme);
@@ -181,10 +401,21 @@ export function AuthFilesPage() {
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(9);
+  const [antigravityPage, setAntigravityPage] = useState(1);
+  const [antigravityPageSize, setAntigravityPageSize] = useState(6);
   const [uploading, setUploading] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deletingAll, setDeletingAll] = useState(false);
   const [keyStats, setKeyStats] = useState<KeyStats>({ bySource: {}, byAuthIndex: {} });
+  const [usageDetails, setUsageDetails] = useState<UsageDetail[]>([]);
+  const [sessionBindings, setSessionBindings] = useState<Record<string, SessionBindingEntry>>({});
+  const [antigravityQuota, setAntigravityQuota] = useState<Record<string, AntigravityQuotaState>>(
+    {}
+  );
+  const [antigravityLoading, setAntigravityLoading] = useState(false);
+  const [antigravityLoadingScope, setAntigravityLoadingScope] = useState<
+    'page' | 'all' | null
+  >(null);
 
   // 详情弹窗相关
   const [detailModalOpen, setDetailModalOpen] = useState(false);
@@ -197,11 +428,6 @@ export function AuthFilesPage() {
   const [modelsFileName, setModelsFileName] = useState('');
   const [modelsFileType, setModelsFileType] = useState('');
   const [modelsError, setModelsError] = useState<'unsupported' | null>(null);
-  const [refreshingQuota, setRefreshingQuota] = useState<Record<string, boolean>>({});
-  const [sessionBindings, setSessionBindings] = useState<Record<string, { sessionCount: number; lastUsedAt: string }>>({});
-  const [sessionBindingsLoaded, setSessionBindingsLoaded] = useState(false);
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  const [togglingDisabled, setTogglingDisabled] = useState<Record<string, boolean>>({});
 
   // OAuth 排除模型相关
   const [excluded, setExcluded] = useState<Record<string, string[]>>({});
@@ -212,6 +438,8 @@ export function AuthFilesPage() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const loadingKeyStatsRef = useRef(false);
+  const antigravityLoadingRef = useRef(false);
+  const antigravityRequestIdRef = useRef(0);
   const excludedUnsupportedRef = useRef(false);
 
   const disableControls = connectionStatus !== 'connected';
@@ -243,76 +471,16 @@ export function AuthFilesPage() {
     }
   }, [t]);
 
-  const refreshAntigravityQuota = useCallback(
-    async (item: AuthFileItem) => {
-      // Prefer id (auth.ID) over name (filename) when available
-      // Backend supports both, but id is the canonical identifier
-      const authID = item.id ? String(item.id).trim() : String(item.name || '').trim();
-      if (!authID) return;
-
-      setRefreshingQuota((prev) => ({ ...prev, [authID]: true }));
-      try {
-        const data = await authFilesApi.refreshAntigravityQuota(authID);
-        const updated = data && (data as any).auth ? ((data as any).auth as AuthFileItem) : null;
-
-        if (updated) {
-          setFiles((prev) =>
-            prev.map((f) => {
-              // Match using same logic as authID extraction
-              const fid = f.id ? String(f.id).trim() : String(f.name || '').trim();
-              return fid === authID ? updated : f;
-            })
-          );
-        } else {
-          await loadFiles();
-        }
-
-        showNotification(t('auth_files.refresh_quota_success', { defaultValue: 'Quota refreshed' }), 'success');
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : t('notification.refresh_failed');
-        showNotification(msg, 'error');
-      } finally {
-        setRefreshingQuota((prev) => {
-          const next = { ...prev };
-          delete next[authID];
-          return next;
-        });
-      }
-    },
-    [loadFiles, showNotification, t]
-  );
-
   const refreshCodexQuota = useCallback(
     async (item: AuthFileItem) => {
-      const authID = item.id ? String(item.id).trim() : String(item.name || '').trim();
-      if (!authID) return;
-
-      setRefreshingQuota((prev) => ({ ...prev, [authID]: true }));
+      const id = (item.id ?? '').toString().trim();
+      if (!id) return;
       try {
-        const data = await authFilesApi.refreshCodexQuota(authID, 'gpt-5.2');
-        const updated = data && (data as any).auth ? ((data as any).auth as AuthFileItem) : null;
-
-        if (updated) {
-          setFiles((prev) =>
-            prev.map((f) => {
-              const fid = f.id ? String(f.id).trim() : String(f.name || '').trim();
-              return fid === authID ? updated : f;
-            })
-          );
-        } else {
-          await loadFiles();
-        }
-
-        showNotification(t('auth_files.refresh_quota_success', { defaultValue: 'Quota refreshed' }), 'success');
+        await authFilesApi.refreshCodexQuota(id);
+        await loadFiles();
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : t('notification.refresh_failed');
-        showNotification(msg, 'error');
-      } finally {
-        setRefreshingQuota((prev) => {
-          const next = { ...prev };
-          delete next[authID];
-          return next;
-        });
+        const message = err instanceof Error ? err.message : t('notification.refresh_failed');
+        showNotification(message, 'error');
       }
     },
     [loadFiles, showNotification, t]
@@ -328,6 +496,9 @@ export function AuthFilesPage() {
       const usageData = usageResponse?.usage ?? usageResponse;
       const stats = await usageApi.getKeyStats(usageData);
       setKeyStats(stats);
+      // 收集 usage 明细用于状态栏
+      const details = collectUsageDetails(usageData);
+      setUsageDetails(details);
     } catch {
       // 静默失败
     } finally {
@@ -337,20 +508,17 @@ export function AuthFilesPage() {
 
   const loadSessionBindings = useCallback(async () => {
     try {
-      const res = await authFilesApi.listSessionBindings();
-      const bindings = res?.bindings ?? [];
-      const next: Record<string, { sessionCount: number; lastUsedAt: string }> = {};
-      for (const b of bindings) {
-        if (!b?.auth_id) continue;
-        next[b.auth_id] = {
-          sessionCount: Number(b.session_count) || 0,
-          lastUsedAt: String(b.last_used_at || '')
-        };
-      }
+      const data = await authFilesApi.listSessionBindings();
+      const list = (data && Array.isArray((data as any).bindings) ? (data as any).bindings : []) as SessionBindingEntry[];
+      const next: Record<string, SessionBindingEntry> = {};
+      list.forEach((entry) => {
+        if (entry && typeof entry.auth_id === 'string' && entry.auth_id.trim()) {
+          next[entry.auth_id] = entry;
+        }
+      });
       setSessionBindings(next);
-      setSessionBindingsLoaded(true);
     } catch {
-      // Silently ignore
+      // optional feature; keep silent when unsupported/unreachable
     }
   }, []);
 
@@ -380,74 +548,171 @@ export function AuthFilesPage() {
     }
   }, [showNotification, t]);
 
-  // Auto-refresh Antigravity quotas when files are loaded
-  const autoRefreshAntigravityQuotas = useCallback(
-    async (authFiles: AuthFileItem[]) => {
-      const antigravityFiles = authFiles.filter(
-        (f) => toLowerString(f.provider || f.type) === 'antigravity' && !isRuntimeOnlyAuthFile(f)
-      );
-      if (antigravityFiles.length === 0) return;
+  const antigravityFiles = useMemo(
+    () => files.filter((file) => isAntigravityFile(file)),
+    [files]
+  );
 
-      // Refresh quotas in parallel (limit concurrency to 3)
-      const batchSize = 3;
-      for (let i = 0; i < antigravityFiles.length; i += batchSize) {
-        const batch = antigravityFiles.slice(i, i + batchSize);
-        await Promise.allSettled(
-          batch.map(async (item) => {
-            const authID = item.id ? String(item.id).trim() : String(item.name || '').trim();
-            if (!authID) return;
+  const antigravityTotalPages = Math.max(
+    1,
+    Math.ceil(antigravityFiles.length / antigravityPageSize)
+  );
+  const antigravityCurrentPage = Math.min(antigravityPage, antigravityTotalPages);
+  const antigravityStart = (antigravityCurrentPage - 1) * antigravityPageSize;
+  const antigravityPageItems = antigravityFiles.slice(
+    antigravityStart,
+    antigravityStart + antigravityPageSize
+  );
 
-            // Skip if already has quota data
-            if (item.antigravity_quota?.models && item.antigravity_quota.models.length > 0) {
-              return;
+  const fetchAntigravityQuota = useCallback(
+    async (authIndex: string): Promise<AntigravityQuotaGroup[]> => {
+      let lastError = '';
+      let hadSuccess = false;
+
+      for (const url of ANTIGRAVITY_QUOTA_URLS) {
+        try {
+          const result = await apiCallApi.request({
+            authIndex,
+            method: 'POST',
+            url,
+            header: { ...ANTIGRAVITY_REQUEST_HEADERS },
+            data: '{}'
+          });
+
+          if (result.statusCode < 200 || result.statusCode >= 300) {
+            lastError = getApiCallErrorMessage(result);
+            continue;
+          }
+
+          hadSuccess = true;
+          const payload = parseAntigravityPayload(result.body ?? result.bodyText);
+          const models = payload?.models;
+          if (!models || typeof models !== 'object' || Array.isArray(models)) {
+            lastError = t('antigravity_quota.empty_models');
+            continue;
+          }
+
+          const groups = buildAntigravityQuotaGroups(models as AntigravityModelsPayload);
+          if (groups.length === 0) {
+            lastError = t('antigravity_quota.empty_models');
+            continue;
+          }
+
+          return groups;
+        } catch (err: unknown) {
+          lastError = err instanceof Error ? err.message : t('common.unknown_error');
+        }
+      }
+
+      if (hadSuccess) {
+        return [];
+      }
+
+      throw new Error(lastError || t('common.unknown_error'));
+    },
+    [t]
+  );
+
+  const loadAntigravityQuota = useCallback(
+    async (targets: AuthFileItem[], scope: 'page' | 'all') => {
+      if (antigravityLoadingRef.current) return;
+      antigravityLoadingRef.current = true;
+      const requestId = ++antigravityRequestIdRef.current;
+      setAntigravityLoading(true);
+      setAntigravityLoadingScope(scope);
+
+      try {
+        if (targets.length === 0) return;
+
+        setAntigravityQuota((prev) => {
+          const nextState = { ...prev };
+          targets.forEach((file) => {
+            nextState[file.name] = { status: 'loading', groups: [] };
+          });
+          return nextState;
+        });
+
+        const results = await Promise.all(
+          targets.map(async (file) => {
+            const rawAuthIndex = file['auth_index'] ?? file.authIndex;
+            const authIndex = normalizeAuthIndexValue(rawAuthIndex);
+            if (!authIndex) {
+              return {
+                name: file.name,
+                status: 'error' as const,
+                error: t('antigravity_quota.missing_auth_index')
+              };
             }
 
             try {
-              const data = await authFilesApi.refreshAntigravityQuota(authID);
-              const updated = data && (data as any).auth ? ((data as any).auth as AuthFileItem) : null;
-              if (updated) {
-                setFiles((prev) =>
-                  prev.map((f) => {
-                    const fid = f.id ? String(f.id).trim() : String(f.name || '').trim();
-                    return fid === authID ? updated : f;
-                  })
-                );
-              }
-            } catch {
-              // Silently ignore errors during auto-refresh
+              const groups = await fetchAntigravityQuota(authIndex);
+              return { name: file.name, status: 'success' as const, groups };
+            } catch (err: unknown) {
+              const message = err instanceof Error ? err.message : t('common.unknown_error');
+              return { name: file.name, status: 'error' as const, error: message };
             }
           })
         );
+
+        if (requestId !== antigravityRequestIdRef.current) return;
+
+        setAntigravityQuota((prev) => {
+          const nextState = { ...prev };
+          results.forEach((result) => {
+            if (result.status === 'success') {
+              nextState[result.name] = {
+                status: 'success',
+                groups: result.groups
+              };
+            } else {
+              nextState[result.name] = {
+                status: 'error',
+                groups: [],
+                error: result.error
+              };
+            }
+          });
+          return nextState;
+        });
+      } finally {
+        if (requestId === antigravityRequestIdRef.current) {
+          setAntigravityLoading(false);
+          setAntigravityLoadingScope(null);
+          antigravityLoadingRef.current = false;
+        }
       }
     },
-    []
+    [fetchAntigravityQuota, t]
   );
 
   useEffect(() => {
-    const initPage = async () => {
-      await loadFiles();
-      loadKeyStats();
-      loadExcluded();
-      loadSessionBindings();
-    };
-    initPage();
+    loadFiles();
+    loadKeyStats();
+    loadExcluded();
+    loadSessionBindings();
   }, [loadFiles, loadKeyStats, loadExcluded, loadSessionBindings]);
 
-  // Auto-refresh Antigravity quotas after files are loaded
   useEffect(() => {
-    if (files.length > 0 && !loading) {
-      autoRefreshAntigravityQuotas(files);
+    if (antigravityFiles.length === 0) {
+      setAntigravityQuota({});
+      return;
     }
-    // Only run when files change (after initial load or refresh)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [files.length, loading]);
+    setAntigravityQuota((prev) => {
+      const nextState: Record<string, AntigravityQuotaState> = {};
+      antigravityFiles.forEach((file) => {
+        const cached = prev[file.name];
+        if (cached) {
+          nextState[file.name] = cached;
+        }
+      });
+      return nextState;
+    });
+  }, [antigravityFiles]);
 
   // 定时刷新状态数据（每240秒）
   useInterval(loadKeyStats, 240_000);
-  // 定时刷新绑定状态（每10秒）
-  useInterval(loadSessionBindings, 10_000);
-  // Cooldown countdown ticker
-  useInterval(() => setNowMs(Date.now()), 5_000);
+  // 定时刷新会话绑定（每5秒）
+  useInterval(loadSessionBindings, 5_000);
 
   // 提取所有存在的类型
   const existingTypes = useMemo(() => {
@@ -459,6 +724,45 @@ export function AuthFilesPage() {
     });
     return Array.from(types);
   }, [files]);
+
+
+  const excludedProviderLookup = useMemo(() => {
+    const lookup = new Map<string, string>();
+    Object.keys(excluded).forEach((provider) => {
+      const key = provider.trim().toLowerCase();
+      if (key && !lookup.has(key)) {
+        lookup.set(key, provider);
+      }
+    });
+    return lookup;
+  }, [excluded]);
+
+  const providerOptions = useMemo(() => {
+    const extraProviders = new Set<string>();
+
+    Object.keys(excluded).forEach((provider) => {
+      extraProviders.add(provider);
+    });
+    files.forEach((file) => {
+      if (typeof file.type === 'string') {
+        extraProviders.add(file.type);
+      }
+      if (typeof file.provider === 'string') {
+        extraProviders.add(file.provider);
+      }
+    });
+
+    const normalizedExtras = Array.from(extraProviders)
+      .map((value) => value.trim())
+      .filter((value) => value && !OAUTH_PROVIDER_EXCLUDES.has(value.toLowerCase()));
+
+    const baseSet = new Set(OAUTH_PROVIDER_PRESETS.map((value) => value.toLowerCase()));
+    const extraList = normalizedExtras
+      .filter((value) => !baseSet.has(value.toLowerCase()))
+      .sort((a, b) => a.localeCompare(b));
+
+    return [...OAUTH_PROVIDER_PRESETS, ...extraList];
+  }, [excluded, files]);
 
   // 过滤和搜索
   const filtered = useMemo(() => {
@@ -706,9 +1010,14 @@ export function AuthFilesPage() {
 
   // OAuth 排除相关方法
   const openExcludedModal = (provider?: string) => {
-    const models = provider ? excluded[provider] : [];
+    const normalizedProvider = (provider || '').trim();
+    const fallbackProvider = normalizedProvider || (filter !== 'all' ? String(filter) : '');
+    const lookupKey = fallbackProvider
+      ? excludedProviderLookup.get(fallbackProvider.toLowerCase())
+      : undefined;
+    const models = lookupKey ? excluded[lookupKey] : [];
     setExcludedForm({
-      provider: provider || '',
+      provider: lookupKey || fallbackProvider,
       modelsText: Array.isArray(models) ? models.join('\n') : ''
     });
     setExcludedModalOpen(true);
@@ -782,130 +1091,128 @@ export function AuthFilesPage() {
     </div>
   );
 
-  // 渲染单个认证文件卡片
-  const renderFileCard = (item: AuthFileItem) => {
-    const fileStats = resolveAuthFileStats(item, keyStats);
-    const isRuntimeOnly = isRuntimeOnlyAuthFile(item);
-    const typeColor = getTypeColor(item.type || 'unknown');
-    const provider = toLowerString(item.provider || item.type);
-    const authID = String(item.id || item.name || '').trim();
-    const authIDOnly = item.id ? String(item.id).trim() : '';
-    const bindingInfo = authIDOnly ? sessionBindings[authIDOnly] : undefined;
+  // 预计算所有认证文件的状态栏数据（避免每次渲染重复计算）
+  const statusBarCache = useMemo(() => {
+    const cache = new Map<string, ReturnType<typeof calculateStatusBarData>>();
 
-    // Priority and status helpers
-    const priority = (item as any).priority as number | undefined;
-    const effectivePriority = typeof priority === 'number' && Number.isFinite(priority) ? priority : 50;
-    const cooldownUntil = parseDate(item.quota?.next_recover_at);
-    const cooldownSecondsRemaining =
-      cooldownUntil && cooldownUntil.getTime() > nowMs ? Math.ceil((cooldownUntil.getTime() - nowMs) / 1000) : 0;
-    const isCoolingDown = cooldownSecondsRemaining > 0 && (item.quota?.exceeded === true || (item as any).unavailable === true);
-    const isUnavailable = (item as any).unavailable === true || isCoolingDown;
-    const isDisabled = (item as any).disabled === true;
-    const isZh = (i18n?.language || '').toLowerCase().startsWith('zh');
+    files.forEach((file) => {
+      const rawAuthIndex = file['auth_index'] ?? file.authIndex;
+      const authIndexKey = normalizeAuthIndexValue(rawAuthIndex);
 
-    const bindingCount = bindingInfo?.sessionCount ?? 0;
-    const lastUsed = bindingInfo?.lastUsedAt ? parseDate(bindingInfo.lastUsedAt) : null;
-    const lastUsedAgeSec = lastUsed ? Math.max(0, Math.floor((nowMs - lastUsed.getTime()) / 1000)) : null;
-    const lastUsedText = lastUsedAgeSec === null ? '' : formatRelativeTime(lastUsedAgeSec, isZh);
-    const cooldownReason = item.quota?.reason ? ` (${item.quota.reason})` : '';
-
-    const getPriorityBadge = () => {
-      const isHighPriority = effectivePriority < 20;
-      const isMediumPriority = effectivePriority >= 20 && effectivePriority < 50;
-      return (
-        <span
-          className={`${styles.priorityBadge} ${isHighPriority ? styles.priorityHigh : isMediumPriority ? styles.priorityMedium : styles.priorityLow}`}
-          title={t('auth_files.priority_tooltip', { defaultValue: `Priority: ${effectivePriority} (lower = higher priority)` })}
-        >
-          P:{effectivePriority}
-        </span>
-      );
-    };
-
-    const getStatusIndicator = () => {
-      if (isDisabled) {
-        return <span className={`${styles.statusIndicator} ${styles.statusDisabled}`} title={t('auth_files.status_disabled', { defaultValue: 'Disabled' })}>⚫</span>;
-      }
-      if (isUnavailable) {
-        const remaining = isCoolingDown ? formatCooldownRemainingSeconds(cooldownSecondsRemaining) : '';
-        const reason = item.quota?.reason ? ` (${item.quota.reason})` : '';
-        const title = remaining
-          ? t('auth_files.status_unavailable_remaining', { defaultValue: `Cooling down: ${remaining}${reason}`, remaining })
-          : t('auth_files.status_unavailable', { defaultValue: 'Unavailable (cooling down)' });
-        return <span className={`${styles.statusIndicator} ${styles.statusUnavailable}`} title={title}>🔴</span>;
-      }
-      return <span className={`${styles.statusIndicator} ${styles.statusActive}`} title={t('auth_files.status_active', { defaultValue: 'Active' })}>🟢</span>;
-    };
-
-    const toggleDisabled = async () => {
-      const id = authIDOnly;
-      if (!id) return;
-
-      setTogglingDisabled((prev) => ({ ...prev, [id]: true }));
-      try {
-        const data = await authFilesApi.setDisabled(id, !isDisabled);
-        const updated = data && (data as any).auth ? ((data as any).auth as AuthFileItem) : null;
-
-        if (updated) {
-          setFiles((prev) => prev.map((f) => (String(f.id || '').trim() === id ? updated : f)));
-        } else {
-          await loadFiles();
-        }
-
-        showNotification(
-          !isDisabled
-            ? t('auth_files.disabled_success', { defaultValue: 'Disabled' })
-            : t('auth_files.enabled_success', { defaultValue: 'Enabled' }),
-          'success'
-        );
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : t('notification.refresh_failed');
-        showNotification(msg, 'error');
-      } finally {
-        setTogglingDisabled((prev) => {
-          const next = { ...prev };
-          delete next[id];
-          return next;
+      if (authIndexKey) {
+        // 过滤出属于该认证文件的 usage 明细
+        const filteredDetails = usageDetails.filter((detail) => {
+          const detailAuthIndex = normalizeAuthIndexValue(detail.auth_index);
+          return detailAuthIndex !== null && detailAuthIndex === authIndexKey;
         });
+        cache.set(authIndexKey, calculateStatusBarData(filteredDetails));
       }
-    };
+    });
+
+    return cache;
+  }, [usageDetails, files]);
+
+  // 渲染状态监测栏
+  const renderStatusBar = (item: AuthFileItem) => {
+    // 认证文件使用 authIndex 来匹配 usage 数据
+    const rawAuthIndex = item['auth_index'] ?? item.authIndex;
+    const authIndexKey = normalizeAuthIndexValue(rawAuthIndex);
+
+    const statusData = (authIndexKey && statusBarCache.get(authIndexKey)) || calculateStatusBarData([]);
+    const hasData = statusData.totalSuccess + statusData.totalFailure > 0;
+    const rateClass = !hasData
+      ? ''
+      : statusData.successRate >= 90
+        ? styles.statusRateHigh
+        : statusData.successRate >= 50
+          ? styles.statusRateMedium
+          : styles.statusRateLow;
 
     return (
-      <div key={item.name} className={`${styles.fileCard} ${isUnavailable ? styles.cardUnavailable : ''} ${isDisabled ? styles.cardDisabled : ''}`}>
-        <div className={styles.cardHeader}>
-          <div className={styles.cardHeaderLeft}>
-            <span
-              className={styles.typeBadge}
-              style={{
-                backgroundColor: typeColor.bg,
-                color: typeColor.text,
-                ...(typeColor.border ? { border: typeColor.border } : {})
-              }}
-            >
-              {getTypeLabel(item.type || 'unknown')}
-            </span>
-            <span className={styles.fileName}>{item.name}</span>
-          </div>
-          <div className={styles.cardHeaderRight}>
-            {getStatusIndicator()}
-            {getPriorityBadge()}
-          </div>
+      <div className={styles.statusBar}>
+        <div className={styles.statusBlocks}>
+          {statusData.blocks.map((state, idx) => {
+            const blockClass =
+              state === 'success'
+                ? styles.statusBlockSuccess
+                : state === 'failure'
+                  ? styles.statusBlockFailure
+                  : state === 'mixed'
+                    ? styles.statusBlockMixed
+                    : styles.statusBlockIdle;
+            return <div key={idx} className={`${styles.statusBlock} ${blockClass}`} />;
+          })}
         </div>
+        <span className={`${styles.statusRate} ${rateClass}`}>
+          {hasData ? `${statusData.successRate.toFixed(1)}%` : '--'}
+        </span>
+      </div>
+    );
+  };
 
-        <div className={styles.cardMeta}>
-          <span>{t('auth_files.file_size')}: {item.size ? formatFileSize(item.size) : '-'}</span>
-          <span>{t('auth_files.file_modified')}: {formatModified(item)}</span>
-          {sessionBindingsLoaded && authIDOnly ? (
-            <span title={lastUsedText ? t('auth_files.sessions_last_used_relative', { defaultValue: `Last used: ${lastUsedText}` }) : undefined}>
-              {t('auth_files.sessions', { defaultValue: 'Sessions' })}: {bindingCount}{lastUsedText ? ` · ${lastUsedText}` : ''}
-            </span>
-          ) : null}
-          {isCoolingDown ? (
-            <span className={styles.cooldownText}>
-              {t('auth_files.cooldown_remaining', { defaultValue: 'Cooldown' })}: {formatCooldownRemainingSeconds(cooldownSecondsRemaining)}{cooldownReason}
-            </span>
-          ) : null}
-        </div>
+	  // 渲染单个认证文件卡片
+	  const renderFileCard = (item: AuthFileItem) => {
+	    const fileStats = resolveAuthFileStats(item, keyStats);
+	    const isRuntimeOnly = isRuntimeOnlyAuthFile(item);
+	    const typeColor = getTypeColor(item.type || 'unknown');
+	    const authID = (item.id ?? '').toString().trim();
+	    const binding = authID ? sessionBindings[authID] : undefined;
+	    const priority = typeof item.priority === 'number' ? item.priority : undefined;
+	    const priorityClass =
+	      priority == null
+	        ? ''
+	        : priority < 20
+	          ? styles.priorityHigh
+	          : priority < 50
+	            ? styles.priorityMedium
+	            : styles.priorityLow;
+	    const status = item.disabled
+	      ? { icon: '⚫', className: styles.statusDisabled }
+	      : item.unavailable || item.quota?.exceeded
+	        ? { icon: '🔴', className: styles.statusUnavailable }
+	        : { icon: '🟢', className: styles.statusActive };
+
+	    const codexQuota = item.codex_quota;
+	    const remainingFromUsedPercent = (used?: number) => {
+	      if (used == null || !Number.isFinite(used)) return null;
+	      return Math.max(0, Math.min(100, 100 - used));
+	    };
+	    const codexPrimaryRemaining = remainingFromUsedPercent(codexQuota?.primary_used_percent);
+	    const codexSecondaryRemaining = remainingFromUsedPercent(codexQuota?.secondary_used_percent);
+
+	    return (
+	      <div key={item.name} className={styles.fileCard}>
+	        <div className={styles.cardHeader}>
+	          <div className={styles.cardHeaderLeft}>
+	            <span
+	              className={styles.typeBadge}
+	              style={{
+	                backgroundColor: typeColor.bg,
+	                color: typeColor.text,
+	                ...(typeColor.border ? { border: typeColor.border } : {})
+	              }}
+	            >
+	              {getTypeLabel(item.type || 'unknown')}
+	            </span>
+	            <span className={styles.fileName}>{item.name}</span>
+	          </div>
+	          <div className={styles.cardHeaderRight}>
+	            <span className={`${styles.statusIndicator} ${status.className}`} title="Auth status">
+	              {status.icon}
+	            </span>
+	            {priority != null ? (
+	              <span className={`${styles.priorityBadge} ${priorityClass}`}>P:{priority}</span>
+	            ) : null}
+	            <span className={styles.sessionBadge} title="Sticky sessions">
+	              🔗 {binding?.session_count ?? 0}
+	            </span>
+	          </div>
+	        </div>
+
+	        <div className={styles.cardMeta}>
+	          <span>{t('auth_files.file_size')}: {item.size ? formatFileSize(item.size) : '-'}</span>
+	          <span>{t('auth_files.file_modified')}: {formatModified(item)}</span>
+	        </div>
 
         <div className={styles.cardStats}>
           <span className={`${styles.statPill} ${styles.statSuccess}`}>
@@ -916,111 +1223,46 @@ export function AuthFilesPage() {
           </span>
         </div>
 
-        {/* Quota */}
-        {provider === 'codex' ? (
-          <div className={styles.quotaSection}>
-            {item.codex_quota ? (
-              <>
-                {item.codex_quota.plan_type ? (
-                  <div className={styles.quotaHint}>
-                    {t('auth_files.codex_plan_type', { defaultValue: 'Plan' })}: {String(item.codex_quota.plan_type)}
-                  </div>
-                ) : null}
-                <QuotaBar
-                  label={t('auth_files.quota_primary', { defaultValue: 'Primary' })}
-                  percent={remainingPercentFromUsedPercent(item.codex_quota.primary_used_percent)}
-                  resetSeconds={item.codex_quota.primary_reset_after_seconds ?? null}
-                />
-                <QuotaBar
-                  label={t('auth_files.quota_secondary', { defaultValue: 'Secondary' })}
-                  percent={remainingPercentFromUsedPercent(item.codex_quota.secondary_used_percent)}
-                  resetSeconds={item.codex_quota.secondary_reset_after_seconds ?? null}
-                />
-                {item.codex_quota.credits_balance ? (
-                  <div className={styles.quotaHint}>
-                    {t('auth_files.codex_credits_balance', { defaultValue: 'Credits balance' })}: {String(item.codex_quota.credits_balance)}
-                  </div>
-                ) : null}
-              </>
-            ) : (
-              <div className={styles.quotaHint}>
-                {t('auth_files.codex_quota_empty', { defaultValue: 'No quota data. Click refresh (uses a tiny probe request).' })}
-              </div>
-            )}
+	        {/* 状态监测栏 */}
+	        {renderStatusBar(item)}
 
-            <div className={styles.quotaActions}>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => refreshCodexQuota(item)}
-                disabled={disableControls || !authID || isRuntimeOnly}
-                loading={!!refreshingQuota[authID]}
-              >
-                {t('auth_files.refresh_quota', { defaultValue: 'Refresh quota' })}
-              </Button>
-            </div>
-          </div>
-        ) : null}
+	        {item.type === 'codex' ? (
+	          <div className={styles.codexQuotaSection}>
+	            <div className={styles.codexQuotaHeader}>
+	              <span className={styles.codexQuotaTitle}>Codex Quota</span>
+	              <Button
+	                variant="secondary"
+	                size="sm"
+	                onClick={() => refreshCodexQuota(item)}
+	                disabled={disableControls}
+	              >
+	                {t('common.refresh')}
+	              </Button>
+	            </div>
+	            <div className={styles.codexQuotaBars}>
+	              <QuotaBar
+	                label="Primary"
+	                percent={codexPrimaryRemaining}
+	                resetSeconds={codexQuota?.primary_reset_after_seconds ?? null}
+	              />
+	              <QuotaBar
+	                label="Secondary"
+	                percent={codexSecondaryRemaining}
+	                resetSeconds={codexQuota?.secondary_reset_after_seconds ?? null}
+	              />
+	            </div>
+	            {codexQuota?.credits_balance ? (
+	              <div className={styles.codexCredits} title="x-codex-credits-balance">
+	                Credits: {codexQuota.credits_balance}
+	              </div>
+	            ) : null}
+	          </div>
+	        ) : null}
 
-        {provider === 'antigravity' ? (
-          <div className={styles.quotaSection}>
-            {item.antigravity_quota?.forbidden ? (
-              <div className={styles.quotaHint}>
-                {t('auth_files.quota_forbidden', { defaultValue: 'Quota unavailable (403)' })}
-              </div>
-            ) : null}
-
-            {(() => {
-              const models = item.antigravity_quota?.models ?? [];
-              return models.length > 0 ? (
-                <div className={styles.quotaList}>
-                  {models.map((m) => (
-                    <QuotaBar
-                      key={m.name}
-                      label={m.name}
-                      percent={m.remaining_percent ?? null}
-                      resetTime={m.reset_time ?? null}
-                    />
-                  ))}
-                </div>
-              ) : (
-                <div className={styles.quotaHint}>
-                  {t('auth_files.quota_empty', { defaultValue: 'No quota data. Click refresh.' })}
-                </div>
-              );
-            })()}
-
-            <div className={styles.quotaActions}>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => refreshAntigravityQuota(item)}
-                disabled={disableControls || !authID || isRuntimeOnly}
-                loading={!!refreshingQuota[authID]}
-              >
-                {t('auth_files.refresh_quota', { defaultValue: 'Refresh quota' })}
-              </Button>
-            </div>
-          </div>
-        ) : null}
-
-        <div className={styles.cardActions}>
-          {isRuntimeOnly ? (
-            <>
-              <div className={styles.virtualBadge}>{t('auth_files.type_virtual') || '虚拟认证文件'}</div>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={toggleDisabled}
-                className={styles.iconButton}
-                title={isDisabled ? t('auth_files.enable_button', { defaultValue: 'Enable' }) : t('auth_files.disable_button', { defaultValue: 'Disable' })}
-                disabled={disableControls || !authIDOnly || !!togglingDisabled[authIDOnly]}
-                loading={!!togglingDisabled[authIDOnly]}
-              >
-                {isDisabled ? <IconEye className={styles.actionIcon} size={16} /> : <IconEyeOff className={styles.actionIcon} size={16} />}
-              </Button>
-            </>
-          ) : (
+	        <div className={styles.cardActions}>
+	          {isRuntimeOnly ? (
+	            <div className={styles.virtualBadge}>{t('auth_files.type_virtual') || '虚拟认证文件'}</div>
+	          ) : (
             <>
               <Button
                 variant="secondary"
@@ -1041,17 +1283,6 @@ export function AuthFilesPage() {
                 disabled={disableControls}
               >
                 <IconInfo className={styles.actionIcon} size={16} />
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={toggleDisabled}
-                className={styles.iconButton}
-                title={isDisabled ? t('auth_files.enable_button', { defaultValue: 'Enable' }) : t('auth_files.disable_button', { defaultValue: 'Disable' })}
-                disabled={disableControls || !authIDOnly || !!togglingDisabled[authIDOnly]}
-                loading={!!togglingDisabled[authIDOnly]}
-              >
-                {isDisabled ? <IconEye className={styles.actionIcon} size={16} /> : <IconEyeOff className={styles.actionIcon} size={16} />}
               </Button>
               <Button
                 variant="secondary"
@@ -1078,6 +1309,79 @@ export function AuthFilesPage() {
                 )}
               </Button>
             </>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderAntigravityCard = (item: AuthFileItem) => {
+    const displayType = item.type || item.provider || 'antigravity';
+    const typeColor = getTypeColor(displayType);
+    const quotaState = antigravityQuota[item.name];
+    const quotaStatus = quotaState?.status ?? 'idle';
+    const quotaGroups = quotaState?.groups ?? [];
+
+    return (
+      <div key={item.name} className={`${styles.fileCard} ${styles.antigravityCard}`}>
+        <div className={styles.cardHeader}>
+          <span
+            className={styles.typeBadge}
+            style={{
+              backgroundColor: typeColor.bg,
+              color: typeColor.text,
+              ...(typeColor.border ? { border: typeColor.border } : {})
+            }}
+          >
+            {getTypeLabel(displayType)}
+          </span>
+          <span className={styles.fileName}>{item.name}</span>
+        </div>
+
+        <div className={styles.quotaSection}>
+          {quotaStatus === 'loading' ? (
+            <div className={styles.quotaMessage}>{t('antigravity_quota.loading')}</div>
+          ) : quotaStatus === 'idle' ? (
+            <div className={styles.quotaMessage}>{t('antigravity_quota.idle')}</div>
+          ) : quotaStatus === 'error' ? (
+            <div className={styles.quotaError}>
+              {t('antigravity_quota.load_failed', {
+                message: quotaState?.error || t('common.unknown_error')
+              })}
+            </div>
+          ) : quotaGroups.length === 0 ? (
+            <div className={styles.quotaMessage}>{t('antigravity_quota.empty_models')}</div>
+          ) : (
+            quotaGroups.map((group) => {
+              const clamped = Math.max(0, Math.min(1, group.remainingFraction));
+              const percent = Math.round(clamped * 100);
+              const resetLabel = formatQuotaResetTime(group.resetTime);
+              const quotaBarClass =
+                percent >= 60
+                  ? styles.quotaBarFillHigh
+                  : percent >= 20
+                    ? styles.quotaBarFillMedium
+                    : styles.quotaBarFillLow;
+              return (
+                <div key={group.id} className={styles.quotaRow}>
+                  <div className={styles.quotaRowHeader}>
+                    <span className={styles.quotaModel} title={group.models.join(', ')}>
+                      {group.label}
+                    </span>
+                    <div className={styles.quotaMeta}>
+                      <span className={styles.quotaPercent}>{percent}%</span>
+                      <span className={styles.quotaReset}>{resetLabel}</span>
+                    </div>
+                  </div>
+                  <div className={styles.quotaBar}>
+                    <div
+                      className={`${styles.quotaBarFill} ${quotaBarClass}`}
+                      style={{ width: `${percent}%` }}
+                    />
+                  </div>
+                </div>
+              );
+            })
           )}
         </div>
       </div>
@@ -1203,6 +1507,99 @@ export function AuthFilesPage() {
               {t('auth_files.pagination_next')}
             </Button>
           </div>
+        )}
+      </Card>
+
+      <Card
+        title={t('antigravity_quota.title')}
+        extra={
+          <div className={styles.headerActions}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => loadAntigravityQuota(antigravityPageItems, 'page')}
+              disabled={disableControls || antigravityLoading || antigravityPageItems.length === 0}
+              loading={antigravityLoading && antigravityLoadingScope === 'page'}
+            >
+              {t('antigravity_quota.refresh_button')}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => loadAntigravityQuota(antigravityFiles, 'all')}
+              disabled={disableControls || antigravityLoading || antigravityFiles.length === 0}
+              loading={antigravityLoading && antigravityLoadingScope === 'all'}
+            >
+              {t('antigravity_quota.fetch_all')}
+            </Button>
+          </div>
+        }
+      >
+        {antigravityFiles.length === 0 ? (
+          <EmptyState
+            title={t('antigravity_quota.empty_title')}
+            description={t('antigravity_quota.empty_desc')}
+          />
+        ) : (
+          <>
+            <div className={styles.antigravityControls}>
+              <div className={styles.antigravityControl}>
+                <label>{t('auth_files.page_size_label')}</label>
+                <select
+                  className={styles.pageSizeSelect}
+                  value={antigravityPageSize}
+                  onChange={(e) => {
+                    setAntigravityPageSize(Number(e.target.value) || 6);
+                    setAntigravityPage(1);
+                  }}
+                >
+                  <option value={6}>6</option>
+                  <option value={9}>9</option>
+                  <option value={12}>12</option>
+                  <option value={18}>18</option>
+                  <option value={24}>24</option>
+                </select>
+              </div>
+              <div className={styles.antigravityControl}>
+                <label>{t('common.info')}</label>
+                <div className={styles.statsInfo}>
+                  {antigravityFiles.length} {t('auth_files.files_count')}
+                </div>
+              </div>
+            </div>
+            <div className={styles.antigravityGrid}>
+              {antigravityPageItems.map(renderAntigravityCard)}
+            </div>
+            {antigravityFiles.length > antigravityPageSize && (
+              <div className={styles.pagination}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setAntigravityPage(Math.max(1, antigravityCurrentPage - 1))}
+                  disabled={antigravityCurrentPage <= 1}
+                >
+                  {t('auth_files.pagination_prev')}
+                </Button>
+                <div className={styles.pageInfo}>
+                  {t('auth_files.pagination_info', {
+                    current: antigravityCurrentPage,
+                    total: antigravityTotalPages,
+                    count: antigravityFiles.length
+                  })}
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() =>
+                    setAntigravityPage(Math.min(antigravityTotalPages, antigravityCurrentPage + 1))
+                  }
+                  disabled={antigravityCurrentPage >= antigravityTotalPages}
+                >
+                  {t('auth_files.pagination_next')}
+                </Button>
+              </div>
+            )}
+          </>
         )}
       </Card>
 
@@ -1354,12 +1751,41 @@ export function AuthFilesPage() {
           </>
         }
       >
-        <Input
-          label={t('oauth_excluded.provider_label')}
-          placeholder={t('oauth_excluded.provider_placeholder')}
-          value={excludedForm.provider}
-          onChange={(e) => setExcludedForm((prev) => ({ ...prev, provider: e.target.value }))}
-        />
+        <div className={styles.providerField}>
+          <Input
+            id="oauth-excluded-provider"
+            list="oauth-excluded-provider-options"
+            label={t('oauth_excluded.provider_label')}
+            hint={t('oauth_excluded.provider_hint')}
+            placeholder={t('oauth_excluded.provider_placeholder')}
+            value={excludedForm.provider}
+            onChange={(e) => setExcludedForm((prev) => ({ ...prev, provider: e.target.value }))}
+          />
+          <datalist id="oauth-excluded-provider-options">
+            {providerOptions.map((provider) => (
+              <option key={provider} value={provider} />
+            ))}
+          </datalist>
+          {providerOptions.length > 0 && (
+            <div className={styles.providerTagList}>
+              {providerOptions.map((provider) => {
+                const isActive =
+                  excludedForm.provider.trim().toLowerCase() === provider.toLowerCase();
+                return (
+                  <button
+                    key={provider}
+                    type="button"
+                    className={`${styles.providerTag} ${isActive ? styles.providerTagActive : ''}`}
+                    onClick={() => setExcludedForm((prev) => ({ ...prev, provider }))}
+                    disabled={savingExcluded}
+                  >
+                    {getTypeLabel(provider)}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
         <div className={styles.formGroup}>
           <label>{t('oauth_excluded.models_label')}</label>
           <textarea
