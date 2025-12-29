@@ -4,14 +4,6 @@ import { apiClient } from './client';
 import { authFilesApi } from './authFiles';
 
 describe('authFilesApi', () => {
-  it('refreshAntigravityQuota posts to management endpoint', async () => {
-    const post = vi.spyOn(apiClient, 'post').mockResolvedValueOnce({ ok: true } as any);
-
-    await authFilesApi.refreshAntigravityQuota('ag-1');
-
-    expect(post).toHaveBeenCalledWith('/auth-files/antigravity-quota', { id: 'ag-1' });
-  });
-
   it('refreshCodexQuota posts to management endpoint', async () => {
     const post = vi.spyOn(apiClient, 'post').mockResolvedValueOnce({ ok: true } as any);
 

@@ -8,9 +8,6 @@ import type { AuthFilesResponse } from '@/types/authFile';
 export const authFilesApi = {
   list: () => apiClient.get<AuthFilesResponse>('/auth-files'),
 
-  refreshAntigravityQuota: (id: string) =>
-    apiClient.post('/auth-files/antigravity-quota', { id }),
-
   refreshCodexQuota: (id: string, model?: string) =>
     apiClient.post('/auth-files/codex-quota', { id, model }),
 
