@@ -1156,6 +1156,7 @@ export function AuthFilesPage() {
 	    const isRuntimeOnly = isRuntimeOnlyAuthFile(item);
 	    const typeColor = getTypeColor(item.type || 'unknown');
 	    const authID = (item.id ?? '').toString().trim();
+	    const cardTestID = `auth-card-${authID || item.name}`;
 	    const binding = authID ? sessionBindings[authID] : undefined;
 	    const priority = typeof item.priority === 'number' ? item.priority : undefined;
 	    const priorityClass =
@@ -1181,7 +1182,7 @@ export function AuthFilesPage() {
 	    const codexSecondaryRemaining = remainingFromUsedPercent(codexQuota?.secondary_used_percent);
 
 	    return (
-	      <div key={item.name} className={styles.fileCard}>
+	      <div key={item.name} className={styles.fileCard} data-testid={cardTestID}>
 	        <div className={styles.cardHeader}>
 	          <div className={styles.cardHeaderLeft}>
 	            <span

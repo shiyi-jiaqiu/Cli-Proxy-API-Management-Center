@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useAuthStore } from '@/stores';
@@ -16,6 +16,9 @@ vi.mock('react-i18next', async () => {
 
 vi.mock('@/services/api', () => {
   return {
+    apiCallApi: {
+      request: vi.fn()
+    },
     authFilesApi: {
       list: vi.fn().mockResolvedValue({
         files: [
@@ -38,10 +41,7 @@ vi.mock('@/services/api', () => {
           {
             id: 'ag-1',
             name: 'antigravity-1.json',
-            type: 'antigravity',
-            antigravity_quota: {
-              models: [{ name: 'gemini-3-pro-high', remaining_percent: 73, reset_time: '2099-01-01T00:00:00Z' }]
-            }
+            type: 'antigravity'
           }
         ]
       }),
@@ -56,6 +56,7 @@ vi.mock('@/services/api', () => {
       refreshAntigravityQuota: vi.fn(),
       refreshCodexQuota: vi.fn()
     },
+    getApiCallErrorMessage: vi.fn().mockReturnValue(''),
     usageApi: {
       getUsage: vi.fn().mockResolvedValue({ usage: {} }),
       getKeyStats: vi.fn().mockResolvedValue({ bySource: {}, byAuthIndex: {} })
@@ -68,21 +69,26 @@ describe('AuthFilesPage quota rendering', () => {
     useAuthStore.setState({ connectionStatus: 'connected' } as any);
   });
 
-  it('renders codex and antigravity quota sections when present', async () => {
+  it('renders codex quota section when present', async () => {
     render(<AuthFilesPage />);
 
     expect(await screen.findByText('codex-1.json')).toBeInTheDocument();
-    expect(screen.getByText('Primary')).toBeInTheDocument();
-    expect(screen.getByText('Secondary')).toBeInTheDocument();
 
-    expect(screen.getByText('antigravity-1.json')).toBeInTheDocument();
-    expect(screen.getByText('gemini-3-pro-high')).toBeInTheDocument();
+    const card = await screen.findByTestId('auth-card-codex-1');
+    expect(within(card).getByText('Codex Quota')).toBeInTheDocument();
+    expect(within(card).getByText('73%')).toBeInTheDocument();
+    expect(within(card).getByText('50%')).toBeInTheDocument();
+
+    const agCard = await screen.findByTestId('auth-card-ag-1');
+    expect(within(agCard).getByText('antigravity-1.json')).toBeInTheDocument();
   });
 
-  it('renders codex quota hint when absent', async () => {
+  it('renders codex quota controls when absent', async () => {
     render(<AuthFilesPage />);
 
     expect(await screen.findByText('codex-2.json')).toBeInTheDocument();
-    expect(screen.getAllByText('No quota data. Click refresh (uses a tiny probe request).').length).toBeGreaterThan(0);
+
+    const card = await screen.findByTestId('auth-card-codex-2');
+    expect(within(card).getAllByText('--').length).toBeGreaterThan(0);
   });
 });
