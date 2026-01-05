@@ -1,16 +1,16 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useInterval } from '@/hooks/useInterval';
+import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { EmptyState } from '@/components/ui/EmptyState';
-import { QuotaBar } from '@/components/ui/QuotaBar';
 import { IconBot, IconDownload, IconInfo, IconTrash2 } from '@/components/ui/icons';
 import { useAuthStore, useNotificationStore, useThemeStore } from '@/stores';
-import { apiCallApi, authFilesApi, getApiCallErrorMessage, usageApi } from '@/services/api';
+import { authFilesApi, usageApi } from '@/services/api';
 import { apiClient } from '@/services/api/client';
 import type { AuthFileItem } from '@/types';
 import type { KeyStats, KeyStatBucket, UsageDetail } from '@/utils/usage';
@@ -79,108 +79,17 @@ const OAUTH_PROVIDER_PRESETS = [
 ];
 
 const OAUTH_PROVIDER_EXCLUDES = new Set(['all', 'unknown', 'empty']);
+const MIN_CARD_PAGE_SIZE = 3;
+const MAX_CARD_PAGE_SIZE = 30;
+const MAX_AUTH_FILE_SIZE = 50 * 1024;
+
+const clampCardPageSize = (value: number) =>
+  Math.min(MAX_CARD_PAGE_SIZE, Math.max(MIN_CARD_PAGE_SIZE, Math.round(value)));
 
 interface ExcludedFormState {
   provider: string;
   modelsText: string;
 }
-
-interface AntigravityQuotaGroup {
-  id: string;
-  label: string;
-  models: string[];
-  remainingFraction: number;
-  resetTime?: string;
-}
-
-interface AntigravityQuotaState {
-  status: 'idle' | 'loading' | 'success' | 'error';
-  groups: AntigravityQuotaGroup[];
-  error?: string;
-}
-
-interface SessionBindingEntry {
-  auth_id: string;
-  session_count: number;
-  last_used_at: string;
-}
-
-interface AntigravityQuotaInfo {
-  displayName?: string;
-  quotaInfo?: {
-    remainingFraction?: number | string;
-    remaining_fraction?: number | string;
-    remaining?: number | string;
-    resetTime?: string;
-    reset_time?: string;
-  };
-  quota_info?: {
-    remainingFraction?: number | string;
-    remaining_fraction?: number | string;
-    remaining?: number | string;
-    resetTime?: string;
-    reset_time?: string;
-  };
-}
-
-type AntigravityModelsPayload = Record<string, AntigravityQuotaInfo>;
-
-interface AntigravityQuotaGroupDefinition {
-  id: string;
-  label: string;
-  identifiers: string[];
-  labelFromModel?: boolean;
-}
-
-const ANTIGRAVITY_QUOTA_URLS = [
-  'https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels',
-  'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels',
-  'https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels'
-];
-
-const ANTIGRAVITY_REQUEST_HEADERS = {
-  Authorization: 'Bearer $TOKEN$',
-  'Content-Type': 'application/json',
-  'User-Agent': 'antigravity/1.11.5 windows/amd64'
-};
-
-const ANTIGRAVITY_QUOTA_GROUPS: AntigravityQuotaGroupDefinition[] = [
-  {
-    id: 'claude-gpt',
-    label: 'Claude/GPT',
-    identifiers: [
-      'claude-sonnet-4-5-thinking',
-      'claude-opus-4-5-thinking',
-      'claude-sonnet-4-5',
-      'gpt-oss-120b-medium'
-    ]
-  },
-  {
-    id: 'gemini',
-    label: 'Gemini',
-    identifiers: [
-      'gemini-3-pro-high',
-      'gemini-3-pro-low',
-      'gemini-2.5-flash',
-      'gemini-2.5-flash-lite',
-      'rev19-uic3-1p'
-    ]
-  },
-  {
-    id: 'gemini-3-flash',
-    label: 'Gemini 3 Flash',
-    identifiers: ['gemini-3-flash']
-  },
-  {
-    id: 'gemini-image',
-    label: 'gemini-3-pro-image',
-    identifiers: ['gemini-3-pro-image'],
-    labelFromModel: true
-  }
-];
-
-
-
 // 标准化 auth_index 值（与 usage.ts 中的 normalizeAuthIndex 保持一致）
 function normalizeAuthIndexValue(value: unknown): string | null {
   if (typeof value === 'number' && Number.isFinite(value)) {
@@ -191,155 +100,6 @@ function normalizeAuthIndexValue(value: unknown): string | null {
     return trimmed ? trimmed : null;
   }
   return null;
-}
-
-function parseAntigravityPayload(payload: unknown): Record<string, unknown> | null {
-  if (payload === undefined || payload === null) return null;
-  if (typeof payload === 'string') {
-    const trimmed = payload.trim();
-    if (!trimmed) return null;
-    try {
-      return JSON.parse(trimmed) as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-  }
-  if (typeof payload === 'object') {
-    return payload as Record<string, unknown>;
-  }
-  return null;
-}
-
-function getAntigravityQuotaInfo(entry?: AntigravityQuotaInfo): {
-  remainingFraction: number | null;
-  resetTime?: string;
-  displayName?: string;
-} {
-  if (!entry) {
-    return { remainingFraction: null };
-  }
-  const quotaInfo = entry.quotaInfo ?? entry.quota_info ?? {};
-  const remainingValue =
-    quotaInfo.remainingFraction ?? quotaInfo.remaining_fraction ?? quotaInfo.remaining;
-  const remainingFraction = Number(remainingValue);
-  const resetValue = quotaInfo.resetTime ?? quotaInfo.reset_time;
-  const resetTime = typeof resetValue === 'string' ? resetValue : undefined;
-  const displayName = typeof entry.displayName === 'string' ? entry.displayName : undefined;
-
-  return {
-    remainingFraction: Number.isFinite(remainingFraction) ? remainingFraction : null,
-    resetTime,
-    displayName
-  };
-}
-
-function findAntigravityModel(
-  models: AntigravityModelsPayload,
-  identifier: string
-): { id: string; entry: AntigravityQuotaInfo } | null {
-  const direct = models[identifier];
-  if (direct) {
-    return { id: identifier, entry: direct };
-  }
-
-  const match = Object.entries(models).find(([, entry]) => {
-    const name = typeof entry?.displayName === 'string' ? entry.displayName : '';
-    return name.toLowerCase() === identifier.toLowerCase();
-  });
-  if (match) {
-    return { id: match[0], entry: match[1] };
-  }
-
-  return null;
-}
-
-function buildAntigravityQuotaGroups(models: AntigravityModelsPayload): AntigravityQuotaGroup[] {
-  const groups: AntigravityQuotaGroup[] = [];
-  let geminiResetTime: string | undefined;
-  const [claudeDef, geminiDef, flashDef, imageDef] = ANTIGRAVITY_QUOTA_GROUPS;
-
-  const buildGroup = (
-    def: AntigravityQuotaGroupDefinition,
-    overrideResetTime?: string
-  ): AntigravityQuotaGroup | null => {
-    const matches = def.identifiers
-      .map((identifier) => findAntigravityModel(models, identifier))
-      .filter((entry): entry is { id: string; entry: AntigravityQuotaInfo } => Boolean(entry));
-
-    const quotaEntries = matches
-      .map(({ id, entry }) => {
-        const info = getAntigravityQuotaInfo(entry);
-        if (info.remainingFraction === null) return null;
-        return {
-          id,
-          remainingFraction: info.remainingFraction,
-          resetTime: info.resetTime,
-          displayName: info.displayName
-        };
-      })
-      .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
-
-    if (quotaEntries.length === 0) return null;
-
-    const remainingFraction = Math.min(...quotaEntries.map((entry) => entry.remainingFraction));
-    const resetTime =
-      overrideResetTime ?? quotaEntries.map((entry) => entry.resetTime).find(Boolean);
-    const displayName = quotaEntries.map((entry) => entry.displayName).find(Boolean);
-    const label = def.labelFromModel && displayName ? displayName : def.label;
-
-    return {
-      id: def.id,
-      label,
-      models: quotaEntries.map((entry) => entry.id),
-      remainingFraction,
-      resetTime
-    };
-  };
-
-  const claudeGroup = buildGroup(claudeDef);
-  if (claudeGroup) {
-    groups.push(claudeGroup);
-  }
-
-  const geminiGroup = buildGroup(geminiDef);
-  if (geminiGroup) {
-    geminiResetTime = geminiGroup.resetTime;
-    groups.push(geminiGroup);
-  }
-
-  const flashGroup = buildGroup(flashDef);
-  if (flashGroup) {
-    groups.push(flashGroup);
-  }
-
-  const imageGroup = buildGroup(imageDef, geminiResetTime);
-  if (imageGroup) {
-    groups.push(imageGroup);
-  }
-
-  return groups;
-}
-
-function formatQuotaResetTime(value?: string): string {
-  if (!value) return '-';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '-';
-  return date.toLocaleString(undefined, {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false
-  });
-}
-
-function resolveAuthProvider(file: AuthFileItem): string {
-  const raw = file.provider ?? file.type ?? '';
-  return String(raw).trim().toLowerCase();
-}
-
-function isAntigravityFile(file: AuthFileItem): boolean {
-  return resolveAuthProvider(file) === 'antigravity';
 }
 
 function isRuntimeOnlyAuthFile(file: AuthFileItem): boolean {
@@ -401,21 +161,11 @@ export function AuthFilesPage() {
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(9);
-  const [antigravityPage, setAntigravityPage] = useState(1);
-  const [antigravityPageSize, setAntigravityPageSize] = useState(6);
   const [uploading, setUploading] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deletingAll, setDeletingAll] = useState(false);
   const [keyStats, setKeyStats] = useState<KeyStats>({ bySource: {}, byAuthIndex: {} });
   const [usageDetails, setUsageDetails] = useState<UsageDetail[]>([]);
-  const [sessionBindings, setSessionBindings] = useState<Record<string, SessionBindingEntry>>({});
-  const [antigravityQuota, setAntigravityQuota] = useState<Record<string, AntigravityQuotaState>>(
-    {}
-  );
-  const [antigravityLoading, setAntigravityLoading] = useState(false);
-  const [antigravityLoadingScope, setAntigravityLoadingScope] = useState<
-    'page' | 'all' | null
-  >(null);
 
   // 详情弹窗相关
   const [detailModalOpen, setDetailModalOpen] = useState(false);
@@ -438,11 +188,16 @@ export function AuthFilesPage() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const loadingKeyStatsRef = useRef(false);
-  const antigravityLoadingRef = useRef(false);
-  const antigravityRequestIdRef = useRef(0);
   const excludedUnsupportedRef = useRef(false);
 
   const disableControls = connectionStatus !== 'connected';
+
+  const handlePageSizeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const value = event.currentTarget.valueAsNumber;
+    if (!Number.isFinite(value)) return;
+    setPageSize(clampCardPageSize(value));
+    setPage(1);
+  };
 
   // 格式化修改时间
   const formatModified = (item: AuthFileItem): string => {
@@ -471,21 +226,6 @@ export function AuthFilesPage() {
     }
   }, [t]);
 
-  const refreshCodexQuota = useCallback(
-    async (item: AuthFileItem) => {
-      const id = (item.id ?? '').toString().trim();
-      if (!id) return;
-      try {
-        await authFilesApi.refreshCodexQuota(id);
-        await loadFiles();
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : t('notification.refresh_failed');
-        showNotification(message, 'error');
-      }
-    },
-    [loadFiles, showNotification, t]
-  );
-
   // 加载 key 统计和 usage 明细（API 层已有60秒超时）
   const loadKeyStats = useCallback(async () => {
     // 防止重复请求
@@ -503,22 +243,6 @@ export function AuthFilesPage() {
       // 静默失败
     } finally {
       loadingKeyStatsRef.current = false;
-    }
-  }, []);
-
-  const loadSessionBindings = useCallback(async () => {
-    try {
-      const data = await authFilesApi.listSessionBindings();
-      const list = (data && Array.isArray((data as any).bindings) ? (data as any).bindings : []) as SessionBindingEntry[];
-      const next: Record<string, SessionBindingEntry> = {};
-      list.forEach((entry) => {
-        if (entry && typeof entry.auth_id === 'string' && entry.auth_id.trim()) {
-          next[entry.auth_id] = entry;
-        }
-      });
-      setSessionBindings(next);
-    } catch {
-      // optional feature; keep silent when unsupported/unreachable
     }
   }, []);
 
@@ -548,171 +272,20 @@ export function AuthFilesPage() {
     }
   }, [showNotification, t]);
 
-  const antigravityFiles = useMemo(
-    () => files.filter((file) => isAntigravityFile(file)),
-    [files]
-  );
+  const handleHeaderRefresh = useCallback(async () => {
+    await Promise.all([loadFiles(), loadKeyStats(), loadExcluded()]);
+  }, [loadFiles, loadKeyStats, loadExcluded]);
 
-  const antigravityTotalPages = Math.max(
-    1,
-    Math.ceil(antigravityFiles.length / antigravityPageSize)
-  );
-  const antigravityCurrentPage = Math.min(antigravityPage, antigravityTotalPages);
-  const antigravityStart = (antigravityCurrentPage - 1) * antigravityPageSize;
-  const antigravityPageItems = antigravityFiles.slice(
-    antigravityStart,
-    antigravityStart + antigravityPageSize
-  );
-
-  const fetchAntigravityQuota = useCallback(
-    async (authIndex: string): Promise<AntigravityQuotaGroup[]> => {
-      let lastError = '';
-      let hadSuccess = false;
-
-      for (const url of ANTIGRAVITY_QUOTA_URLS) {
-        try {
-          const result = await apiCallApi.request({
-            authIndex,
-            method: 'POST',
-            url,
-            header: { ...ANTIGRAVITY_REQUEST_HEADERS },
-            data: '{}'
-          });
-
-          if (result.statusCode < 200 || result.statusCode >= 300) {
-            lastError = getApiCallErrorMessage(result);
-            continue;
-          }
-
-          hadSuccess = true;
-          const payload = parseAntigravityPayload(result.body ?? result.bodyText);
-          const models = payload?.models;
-          if (!models || typeof models !== 'object' || Array.isArray(models)) {
-            lastError = t('antigravity_quota.empty_models');
-            continue;
-          }
-
-          const groups = buildAntigravityQuotaGroups(models as AntigravityModelsPayload);
-          if (groups.length === 0) {
-            lastError = t('antigravity_quota.empty_models');
-            continue;
-          }
-
-          return groups;
-        } catch (err: unknown) {
-          lastError = err instanceof Error ? err.message : t('common.unknown_error');
-        }
-      }
-
-      if (hadSuccess) {
-        return [];
-      }
-
-      throw new Error(lastError || t('common.unknown_error'));
-    },
-    [t]
-  );
-
-  const loadAntigravityQuota = useCallback(
-    async (targets: AuthFileItem[], scope: 'page' | 'all') => {
-      if (antigravityLoadingRef.current) return;
-      antigravityLoadingRef.current = true;
-      const requestId = ++antigravityRequestIdRef.current;
-      setAntigravityLoading(true);
-      setAntigravityLoadingScope(scope);
-
-      try {
-        if (targets.length === 0) return;
-
-        setAntigravityQuota((prev) => {
-          const nextState = { ...prev };
-          targets.forEach((file) => {
-            nextState[file.name] = { status: 'loading', groups: [] };
-          });
-          return nextState;
-        });
-
-        const results = await Promise.all(
-          targets.map(async (file) => {
-            const rawAuthIndex = file['auth_index'] ?? file.authIndex;
-            const authIndex = normalizeAuthIndexValue(rawAuthIndex);
-            if (!authIndex) {
-              return {
-                name: file.name,
-                status: 'error' as const,
-                error: t('antigravity_quota.missing_auth_index')
-              };
-            }
-
-            try {
-              const groups = await fetchAntigravityQuota(authIndex);
-              return { name: file.name, status: 'success' as const, groups };
-            } catch (err: unknown) {
-              const message = err instanceof Error ? err.message : t('common.unknown_error');
-              return { name: file.name, status: 'error' as const, error: message };
-            }
-          })
-        );
-
-        if (requestId !== antigravityRequestIdRef.current) return;
-
-        setAntigravityQuota((prev) => {
-          const nextState = { ...prev };
-          results.forEach((result) => {
-            if (result.status === 'success') {
-              nextState[result.name] = {
-                status: 'success',
-                groups: result.groups
-              };
-            } else {
-              nextState[result.name] = {
-                status: 'error',
-                groups: [],
-                error: result.error
-              };
-            }
-          });
-          return nextState;
-        });
-      } finally {
-        if (requestId === antigravityRequestIdRef.current) {
-          setAntigravityLoading(false);
-          setAntigravityLoadingScope(null);
-          antigravityLoadingRef.current = false;
-        }
-      }
-    },
-    [fetchAntigravityQuota, t]
-  );
+  useHeaderRefresh(handleHeaderRefresh);
 
   useEffect(() => {
     loadFiles();
     loadKeyStats();
     loadExcluded();
-    loadSessionBindings();
-  }, [loadFiles, loadKeyStats, loadExcluded, loadSessionBindings]);
-
-  useEffect(() => {
-    if (antigravityFiles.length === 0) {
-      setAntigravityQuota({});
-      return;
-    }
-    setAntigravityQuota((prev) => {
-      const nextState: Record<string, AntigravityQuotaState> = {};
-      antigravityFiles.forEach((file) => {
-        const cached = prev[file.name];
-        if (cached) {
-          nextState[file.name] = cached;
-        }
-      });
-      return nextState;
-    });
-  }, [antigravityFiles]);
+  }, [loadFiles, loadKeyStats, loadExcluded]);
 
   // 定时刷新状态数据（每240秒）
   useInterval(loadKeyStats, 240_000);
-  // 定时刷新会话绑定（每5秒）
-  useInterval(loadSessionBindings, 5_000);
 
   // 提取所有存在的类型
   const existingTypes = useMemo(() => {
@@ -784,9 +357,6 @@ export function AuthFilesPage() {
   const start = (currentPage - 1) * pageSize;
   const pageItems = filtered.slice(start, start + pageSize);
 
-  // 统计信息
-  const totalSize = useMemo(() => files.reduce((sum, item) => sum + (item.size || 0), 0), [files]);
-
   // 点击上传
   const handleUploadClick = () => {
     fileInputRef.current?.click();
@@ -800,17 +370,28 @@ export function AuthFilesPage() {
     const filesToUpload = Array.from(fileList);
     const validFiles: File[] = [];
     const invalidFiles: string[] = [];
+    const oversizedFiles: string[] = [];
 
     filesToUpload.forEach((file) => {
-      if (file.name.endsWith('.json')) {
-        validFiles.push(file);
-      } else {
+      if (!file.name.endsWith('.json')) {
         invalidFiles.push(file.name);
+        return;
       }
+      if (file.size > MAX_AUTH_FILE_SIZE) {
+        oversizedFiles.push(file.name);
+        return;
+      }
+      validFiles.push(file);
     });
 
     if (invalidFiles.length > 0) {
       showNotification(t('auth_files.upload_error_json'), 'error');
+    }
+    if (oversizedFiles.length > 0) {
+      showNotification(
+        t('auth_files.upload_error_size', { maxSize: formatFileSize(MAX_AUTH_FILE_SIZE) }),
+        'error'
+      );
     }
 
     if (validFiles.length === 0) {
@@ -1150,70 +731,34 @@ export function AuthFilesPage() {
     );
   };
 
-	  // 渲染单个认证文件卡片
-	  const renderFileCard = (item: AuthFileItem) => {
-	    const fileStats = resolveAuthFileStats(item, keyStats);
-	    const isRuntimeOnly = isRuntimeOnlyAuthFile(item);
-	    const typeColor = getTypeColor(item.type || 'unknown');
-	    const authID = (item.id ?? '').toString().trim();
-	    const cardTestID = `auth-card-${authID || item.name}`;
-	    const binding = authID ? sessionBindings[authID] : undefined;
-	    const priority = typeof item.priority === 'number' ? item.priority : undefined;
-	    const priorityClass =
-	      priority == null
-	        ? ''
-	        : priority < 20
-	          ? styles.priorityHigh
-	          : priority < 50
-	            ? styles.priorityMedium
-	            : styles.priorityLow;
-	    const status = item.disabled
-	      ? { icon: '⚫', className: styles.statusDisabled }
-	      : item.unavailable || item.quota?.exceeded
-	        ? { icon: '🔴', className: styles.statusUnavailable }
-	        : { icon: '🟢', className: styles.statusActive };
+  // 渲染单个认证文件卡片
+  const renderFileCard = (item: AuthFileItem) => {
+    const fileStats = resolveAuthFileStats(item, keyStats);
+    const isRuntimeOnly = isRuntimeOnlyAuthFile(item);
+    const isAistudio = (item.type || '').toLowerCase() === 'aistudio';
+    const showModelsButton = !isRuntimeOnly || isAistudio;
+    const typeColor = getTypeColor(item.type || 'unknown');
 
-	    const codexQuota = item.codex_quota;
-	    const remainingFromUsedPercent = (used?: number) => {
-	      if (used == null || !Number.isFinite(used)) return null;
-	      return Math.max(0, Math.min(100, 100 - used));
-	    };
-	    const codexPrimaryRemaining = remainingFromUsedPercent(codexQuota?.primary_used_percent);
-	    const codexSecondaryRemaining = remainingFromUsedPercent(codexQuota?.secondary_used_percent);
+    return (
+      <div key={item.name} className={styles.fileCard}>
+        <div className={styles.cardHeader}>
+          <span
+            className={styles.typeBadge}
+            style={{
+              backgroundColor: typeColor.bg,
+              color: typeColor.text,
+              ...(typeColor.border ? { border: typeColor.border } : {})
+            }}
+          >
+            {getTypeLabel(item.type || 'unknown')}
+          </span>
+          <span className={styles.fileName}>{item.name}</span>
+        </div>
 
-	    return (
-	      <div key={item.name} className={styles.fileCard} data-testid={cardTestID}>
-	        <div className={styles.cardHeader}>
-	          <div className={styles.cardHeaderLeft}>
-	            <span
-	              className={styles.typeBadge}
-	              style={{
-	                backgroundColor: typeColor.bg,
-	                color: typeColor.text,
-	                ...(typeColor.border ? { border: typeColor.border } : {})
-	              }}
-	            >
-	              {getTypeLabel(item.type || 'unknown')}
-	            </span>
-	            <span className={styles.fileName}>{item.name}</span>
-	          </div>
-	          <div className={styles.cardHeaderRight}>
-	            <span className={`${styles.statusIndicator} ${status.className}`} title="Auth status">
-	              {status.icon}
-	            </span>
-	            {priority != null ? (
-	              <span className={`${styles.priorityBadge} ${priorityClass}`}>P:{priority}</span>
-	            ) : null}
-	            <span className={styles.sessionBadge} title="Sticky sessions">
-	              🔗 {binding?.session_count ?? 0}
-	            </span>
-	          </div>
-	        </div>
-
-	        <div className={styles.cardMeta}>
-	          <span>{t('auth_files.file_size')}: {item.size ? formatFileSize(item.size) : '-'}</span>
-	          <span>{t('auth_files.file_modified')}: {formatModified(item)}</span>
-	        </div>
+        <div className={styles.cardMeta}>
+          <span>{t('auth_files.file_size')}: {item.size ? formatFileSize(item.size) : '-'}</span>
+          <span>{t('auth_files.file_modified')}: {formatModified(item)}</span>
+        </div>
 
         <div className={styles.cardStats}>
           <span className={`${styles.statPill} ${styles.statSuccess}`}>
@@ -1224,57 +769,24 @@ export function AuthFilesPage() {
           </span>
         </div>
 
-	        {/* 状态监测栏 */}
-	        {renderStatusBar(item)}
+        {/* 状态监测栏 */}
+        {renderStatusBar(item)}
 
-	        {item.type === 'codex' ? (
-	          <div className={styles.codexQuotaSection}>
-	            <div className={styles.codexQuotaHeader}>
-	              <span className={styles.codexQuotaTitle}>Codex Quota</span>
-	              <Button
-	                variant="secondary"
-	                size="sm"
-	                onClick={() => refreshCodexQuota(item)}
-	                disabled={disableControls}
-	              >
-	                {t('common.refresh')}
-	              </Button>
-	            </div>
-	            <div className={styles.codexQuotaBars}>
-	              <QuotaBar
-	                label="Primary"
-	                percent={codexPrimaryRemaining}
-	                resetSeconds={codexQuota?.primary_reset_after_seconds ?? null}
-	              />
-	              <QuotaBar
-	                label="Secondary"
-	                percent={codexSecondaryRemaining}
-	                resetSeconds={codexQuota?.secondary_reset_after_seconds ?? null}
-	              />
-	            </div>
-	            {codexQuota?.credits_balance ? (
-	              <div className={styles.codexCredits} title="x-codex-credits-balance">
-	                Credits: {codexQuota.credits_balance}
-	              </div>
-	            ) : null}
-	          </div>
-	        ) : null}
-
-	        <div className={styles.cardActions}>
-	          {isRuntimeOnly ? (
-	            <div className={styles.virtualBadge}>{t('auth_files.type_virtual') || '虚拟认证文件'}</div>
-	          ) : (
+        <div className={styles.cardActions}>
+          {showModelsButton && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => showModels(item)}
+              className={styles.iconButton}
+              title={t('auth_files.models_button', { defaultValue: '模型' })}
+              disabled={disableControls}
+            >
+              <IconBot className={styles.actionIcon} size={16} />
+            </Button>
+          )}
+          {!isRuntimeOnly && (
             <>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => showModels(item)}
-                className={styles.iconButton}
-                title={t('auth_files.models_button', { defaultValue: '模型' })}
-                disabled={disableControls}
-              >
-                <IconBot className={styles.actionIcon} size={16} />
-              </Button>
               <Button
                 variant="secondary"
                 size="sm"
@@ -1311,83 +823,20 @@ export function AuthFilesPage() {
               </Button>
             </>
           )}
-        </div>
-      </div>
-    );
-  };
-
-  const renderAntigravityCard = (item: AuthFileItem) => {
-    const displayType = item.type || item.provider || 'antigravity';
-    const typeColor = getTypeColor(displayType);
-    const quotaState = antigravityQuota[item.name];
-    const quotaStatus = quotaState?.status ?? 'idle';
-    const quotaGroups = quotaState?.groups ?? [];
-
-    return (
-      <div key={item.name} className={`${styles.fileCard} ${styles.antigravityCard}`}>
-        <div className={styles.cardHeader}>
-          <span
-            className={styles.typeBadge}
-            style={{
-              backgroundColor: typeColor.bg,
-              color: typeColor.text,
-              ...(typeColor.border ? { border: typeColor.border } : {})
-            }}
-          >
-            {getTypeLabel(displayType)}
-          </span>
-          <span className={styles.fileName}>{item.name}</span>
-        </div>
-
-        <div className={styles.quotaSection}>
-          {quotaStatus === 'loading' ? (
-            <div className={styles.quotaMessage}>{t('antigravity_quota.loading')}</div>
-          ) : quotaStatus === 'idle' ? (
-            <div className={styles.quotaMessage}>{t('antigravity_quota.idle')}</div>
-          ) : quotaStatus === 'error' ? (
-            <div className={styles.quotaError}>
-              {t('antigravity_quota.load_failed', {
-                message: quotaState?.error || t('common.unknown_error')
-              })}
-            </div>
-          ) : quotaGroups.length === 0 ? (
-            <div className={styles.quotaMessage}>{t('antigravity_quota.empty_models')}</div>
-          ) : (
-            quotaGroups.map((group) => {
-              const clamped = Math.max(0, Math.min(1, group.remainingFraction));
-              const percent = Math.round(clamped * 100);
-              const resetLabel = formatQuotaResetTime(group.resetTime);
-              const quotaBarClass =
-                percent >= 60
-                  ? styles.quotaBarFillHigh
-                  : percent >= 20
-                    ? styles.quotaBarFillMedium
-                    : styles.quotaBarFillLow;
-              return (
-                <div key={group.id} className={styles.quotaRow}>
-                  <div className={styles.quotaRowHeader}>
-                    <span className={styles.quotaModel} title={group.models.join(', ')}>
-                      {group.label}
-                    </span>
-                    <div className={styles.quotaMeta}>
-                      <span className={styles.quotaPercent}>{percent}%</span>
-                      <span className={styles.quotaReset}>{resetLabel}</span>
-                    </div>
-                  </div>
-                  <div className={styles.quotaBar}>
-                    <div
-                      className={`${styles.quotaBarFill} ${quotaBarClass}`}
-                      style={{ width: `${percent}%` }}
-                    />
-                  </div>
-                </div>
-              );
-            })
+          {isRuntimeOnly && (
+            <div className={styles.virtualBadge}>{t('auth_files.type_virtual') || '虚拟认证文件'}</div>
           )}
         </div>
       </div>
     );
   };
+
+  const titleNode = (
+    <div className={styles.titleWrapper}>
+      <span>{t('auth_files.title_section')}</span>
+      {files.length > 0 && <span className={styles.countBadge}>{files.length}</span>}
+    </div>
+  );
 
   return (
     <div className={styles.container}>
@@ -1397,10 +846,15 @@ export function AuthFilesPage() {
       </div>
 
       <Card
-        title={t('auth_files.title_section')}
+        title={titleNode}
         extra={
           <div className={styles.headerActions}>
-            <Button variant="secondary" size="sm" onClick={() => { loadFiles(); loadKeyStats(); }} disabled={loading}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleHeaderRefresh}
+              disabled={loading}
+            >
               {t('common.refresh')}
             </Button>
             <Button
@@ -1446,26 +900,15 @@ export function AuthFilesPage() {
             </div>
             <div className={styles.filterItem}>
               <label>{t('auth_files.page_size_label')}</label>
-              <select
+              <input
                 className={styles.pageSizeSelect}
+                type="number"
+                min={MIN_CARD_PAGE_SIZE}
+                max={MAX_CARD_PAGE_SIZE}
+                step={1}
                 value={pageSize}
-                onChange={(e) => {
-                  setPageSize(Number(e.target.value) || 9);
-                  setPage(1);
-                }}
-              >
-                <option value={6}>6</option>
-                <option value={9}>9</option>
-                <option value={12}>12</option>
-                <option value={18}>18</option>
-                <option value={24}>24</option>
-              </select>
-            </div>
-            <div className={styles.filterItem}>
-              <label>{t('common.info')}</label>
-              <div className={styles.statsInfo}>
-                {files.length} {t('auth_files.files_count')} · {formatFileSize(totalSize)}
-              </div>
+                onChange={handlePageSizeChange}
+              />
             </div>
           </div>
         </div>
@@ -1508,99 +951,6 @@ export function AuthFilesPage() {
               {t('auth_files.pagination_next')}
             </Button>
           </div>
-        )}
-      </Card>
-
-      <Card
-        title={t('antigravity_quota.title')}
-        extra={
-          <div className={styles.headerActions}>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => loadAntigravityQuota(antigravityPageItems, 'page')}
-              disabled={disableControls || antigravityLoading || antigravityPageItems.length === 0}
-              loading={antigravityLoading && antigravityLoadingScope === 'page'}
-            >
-              {t('antigravity_quota.refresh_button')}
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => loadAntigravityQuota(antigravityFiles, 'all')}
-              disabled={disableControls || antigravityLoading || antigravityFiles.length === 0}
-              loading={antigravityLoading && antigravityLoadingScope === 'all'}
-            >
-              {t('antigravity_quota.fetch_all')}
-            </Button>
-          </div>
-        }
-      >
-        {antigravityFiles.length === 0 ? (
-          <EmptyState
-            title={t('antigravity_quota.empty_title')}
-            description={t('antigravity_quota.empty_desc')}
-          />
-        ) : (
-          <>
-            <div className={styles.antigravityControls}>
-              <div className={styles.antigravityControl}>
-                <label>{t('auth_files.page_size_label')}</label>
-                <select
-                  className={styles.pageSizeSelect}
-                  value={antigravityPageSize}
-                  onChange={(e) => {
-                    setAntigravityPageSize(Number(e.target.value) || 6);
-                    setAntigravityPage(1);
-                  }}
-                >
-                  <option value={6}>6</option>
-                  <option value={9}>9</option>
-                  <option value={12}>12</option>
-                  <option value={18}>18</option>
-                  <option value={24}>24</option>
-                </select>
-              </div>
-              <div className={styles.antigravityControl}>
-                <label>{t('common.info')}</label>
-                <div className={styles.statsInfo}>
-                  {antigravityFiles.length} {t('auth_files.files_count')}
-                </div>
-              </div>
-            </div>
-            <div className={styles.antigravityGrid}>
-              {antigravityPageItems.map(renderAntigravityCard)}
-            </div>
-            {antigravityFiles.length > antigravityPageSize && (
-              <div className={styles.pagination}>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => setAntigravityPage(Math.max(1, antigravityCurrentPage - 1))}
-                  disabled={antigravityCurrentPage <= 1}
-                >
-                  {t('auth_files.pagination_prev')}
-                </Button>
-                <div className={styles.pageInfo}>
-                  {t('auth_files.pagination_info', {
-                    current: antigravityCurrentPage,
-                    total: antigravityTotalPages,
-                    count: antigravityFiles.length
-                  })}
-                </div>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() =>
-                    setAntigravityPage(Math.min(antigravityTotalPages, antigravityCurrentPage + 1))
-                  }
-                  disabled={antigravityCurrentPage >= antigravityTotalPages}
-                >
-                  {t('auth_files.pagination_next')}
-                </Button>
-              </div>
-            )}
-          </>
         )}
       </Card>
 
