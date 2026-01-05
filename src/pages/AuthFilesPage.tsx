@@ -79,6 +79,7 @@ const OAUTH_PROVIDER_PRESETS = [
 ];
 
 const OAUTH_PROVIDER_EXCLUDES = new Set(['all', 'unknown', 'empty']);
+const MAX_AUTH_FILE_SIZE = 50 * 1024;
 
 interface ExcludedFormState {
   provider: string;
@@ -802,10 +803,16 @@ export function AuthFilesPage() {
     const invalidFiles: string[] = [];
 
     filesToUpload.forEach((file) => {
-      if (file.name.endsWith('.json')) {
-        validFiles.push(file);
-      } else {
+      if (!file.name.endsWith('.json')) {
         invalidFiles.push(file.name);
+      } else if (file.size > MAX_AUTH_FILE_SIZE) {
+        invalidFiles.push(file.name);
+        showNotification(
+          t('auth_files.upload_error_size', { maxSize: formatFileSize(MAX_AUTH_FILE_SIZE) }),
+          'error'
+        );
+      } else {
+        validFiles.push(file);
       }
     });
 

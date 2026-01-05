@@ -32,6 +32,28 @@
   flex-wrap: wrap;
 }
 
+.titleWrapper {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  line-height: 24px;
+}
+
+.countBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  min-width: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--count-badge-text);
+  background-color: var(--count-badge-bg);
+  box-sizing: border-box;
+}
+
 .errorBox {
   padding: $spacing-md;
   background-color: rgba(239, 68, 68, 0.1);
@@ -124,7 +146,7 @@
   background-color: var(--bg-primary);
   color: var(--text-primary);
   font-size: 14px;
-  cursor: pointer;
+  cursor: text;
   height: 38px;
   box-sizing: border-box;
 
@@ -132,19 +154,6 @@
     outline: none;
     border-color: var(--primary-color);
   }
-}
-
-.statsInfo {
-  padding: 8px 12px;
-  background-color: var(--bg-secondary);
-  border-radius: $radius-md;
-  font-size: 13px;
-  color: var(--text-secondary);
-  white-space: nowrap;
-  height: 38px;
-  box-sizing: border-box;
-  display: flex;
-  align-items: center;
 }
 
 // 卡片网格
@@ -163,6 +172,34 @@
 }
 
 .antigravityGrid {
+  display: grid;
+  gap: $spacing-md;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+
+  @include tablet {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+.codexGrid {
+  display: grid;
+  gap: $spacing-md;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+
+  @include tablet {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+.geminiCliGrid {
   display: grid;
   gap: $spacing-md;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -197,11 +234,69 @@
   }
 }
 
+.codexControls {
+  display: flex;
+  gap: $spacing-md;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin-bottom: $spacing-md;
+}
+
+.codexControl {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+}
+
+.geminiCliControls {
+  display: flex;
+  gap: $spacing-md;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin-bottom: $spacing-md;
+}
+
+.geminiCliControl {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+}
+
 .antigravityCard {
   background-image: linear-gradient(
     180deg,
     rgba(224, 247, 250, 0.12),
     rgba(224, 247, 250, 0)
+  );
+}
+
+.codexCard {
+  background-image: linear-gradient(
+    180deg,
+    rgba(255, 243, 224, 0.18),
+    rgba(255, 243, 224, 0)
+  );
+}
+
+.geminiCliCard {
+  background-image: linear-gradient(
+    180deg,
+    rgba(231, 239, 255, 0.2),
+    rgba(231, 239, 255, 0)
   );
 }
 
@@ -328,6 +423,10 @@
   color: var(--text-tertiary);
 }
 
+.quotaAmount {
+  color: var(--text-secondary);
+}
+
 .quotaMessage {
   font-size: 12px;
   color: var(--text-tertiary);
@@ -342,6 +441,33 @@
   border: 1px solid var(--danger-color);
   border-radius: $radius-sm;
   padding: $spacing-xs $spacing-sm;
+}
+
+.quotaWarning {
+  font-size: 12px;
+  color: var(--warning-color, #f59e0b);
+  background-color: rgba(245, 158, 11, 0.12);
+  border: 1px solid var(--warning-color, #f59e0b);
+  border-radius: $radius-sm;
+  padding: $spacing-xs $spacing-sm;
+}
+
+.codexPlan {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.codexPlanLabel {
+  color: var(--text-tertiary);
+}
+
+.codexPlanValue {
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: capitalize;
 }
 
 // 单个认证文件卡片
