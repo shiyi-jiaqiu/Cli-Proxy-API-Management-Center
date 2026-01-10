@@ -12,6 +12,9 @@ export const authFilesApi = {
   refreshCodexQuota: (id: string, model?: string) =>
     apiClient.post('/auth-files/codex-quota', { id, model }),
 
+  refreshKiroQuota: (id: string) =>
+    apiClient.post('/auth-files/kiro-quota', { id }),
+
   listSessionBindings: () =>
     apiClient.get<{ bindings: { auth_id: string; session_count: number; last_used_at: string }[] }>('/auth-files/session-bindings'),
 

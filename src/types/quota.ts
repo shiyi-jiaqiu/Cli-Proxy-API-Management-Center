@@ -144,3 +144,20 @@ export interface CodexQuotaState {
   error?: string;
   errorStatus?: number;
 }
+
+export interface KiroQuotaBreakdownState {
+  id: string;
+  label: string;
+  usedPercent: number | null;
+  currentUsage: number | null;
+  usageLimit: number | null;
+}
+
+export interface KiroQuotaState {
+  status: 'idle' | 'loading' | 'success' | 'error';
+  subscriptionType?: string | null;
+  daysUntilReset?: number | null;
+  breakdowns: KiroQuotaBreakdownState[];
+  error?: string;
+  errorStatus?: number;
+}

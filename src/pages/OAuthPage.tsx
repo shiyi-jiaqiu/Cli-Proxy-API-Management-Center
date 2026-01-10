@@ -15,6 +15,7 @@ import iconGemini from '@/assets/icons/gemini.svg';
 import iconQwen from '@/assets/icons/qwen.svg';
 import iconIflow from '@/assets/icons/iflow.svg';
 import iconVertex from '@/assets/icons/vertex.svg';
+import { shouldShowOAuthCallbackInput } from './oauthCallbackSupport';
 
 interface ProviderState {
   url?: string;
@@ -24,6 +25,8 @@ interface ProviderState {
   polling?: boolean;
   projectId?: string;
   projectIdError?: string;
+  method?: string;
+  userCode?: string;
   callbackUrl?: string;
   callbackSubmitting?: boolean;
   callbackStatus?: 'success' | 'error';
@@ -59,10 +62,10 @@ const PROVIDERS: { id: OAuthProvider; titleKey: string; hintKey: string; urlLabe
   { id: 'anthropic', titleKey: 'auth_login.anthropic_oauth_title', hintKey: 'auth_login.anthropic_oauth_hint', urlLabelKey: 'auth_login.anthropic_oauth_url_label', icon: iconClaude },
   { id: 'antigravity', titleKey: 'auth_login.antigravity_oauth_title', hintKey: 'auth_login.antigravity_oauth_hint', urlLabelKey: 'auth_login.antigravity_oauth_url_label', icon: iconAntigravity },
   { id: 'gemini-cli', titleKey: 'auth_login.gemini_cli_oauth_title', hintKey: 'auth_login.gemini_cli_oauth_hint', urlLabelKey: 'auth_login.gemini_cli_oauth_url_label', icon: iconGemini },
+  { id: 'kiro', titleKey: 'auth_login.kiro_oauth_title', hintKey: 'auth_login.kiro_oauth_hint', urlLabelKey: 'auth_login.kiro_oauth_url_label', icon: iconVertex },
   { id: 'qwen', titleKey: 'auth_login.qwen_oauth_title', hintKey: 'auth_login.qwen_oauth_hint', urlLabelKey: 'auth_login.qwen_oauth_url_label', icon: iconQwen }
 ];
 
-const CALLBACK_SUPPORTED: OAuthProvider[] = ['codex', 'anthropic', 'antigravity', 'gemini-cli'];
 const getProviderI18nPrefix = (provider: OAuthProvider) => provider.replace('-', '_');
 const getAuthKey = (provider: OAuthProvider, suffix: string) =>
   `auth_login.${getProviderI18nPrefix(provider)}_${suffix}`;
@@ -118,6 +121,10 @@ export function OAuthPage() {
           );
           window.clearInterval(timer);
           delete timers.current[provider];
+        } else if (res.status === 'auth_url') {
+          updateProviderState(provider, { url: res.url });
+        } else if (res.status === 'device_code') {
+          updateProviderState(provider, { url: res.verification_url, userCode: res.user_code });
         }
       } catch (err: any) {
         updateProviderState(provider, { status: 'error', error: err?.message, polling: false });
@@ -130,6 +137,7 @@ export function OAuthPage() {
 
   const startAuth = async (provider: OAuthProvider) => {
     const projectId = provider === 'gemini-cli' ? (states[provider]?.projectId || '').trim() : undefined;
+    const kiroMethod = provider === 'kiro' ? (states[provider]?.method || 'aws').trim() : undefined;
     // 项目 ID 现在是可选的，如果不输入将自动选择第一个可用项目
     if (provider === 'gemini-cli') {
       updateProviderState(provider, { projectIdError: undefined });
@@ -138,15 +146,21 @@ export function OAuthPage() {
       status: 'waiting',
       polling: true,
       error: undefined,
+      userCode: undefined,
       callbackStatus: undefined,
       callbackError: undefined,
       callbackUrl: ''
     });
     try {
-      const res = await oauthApi.startAuth(
-        provider,
-        provider === 'gemini-cli' ? { projectId: projectId || undefined } : undefined
-      );
+      const res = await oauthApi.startAuth(provider, (() => {
+        if (provider === 'gemini-cli') {
+          return { projectId: projectId || undefined };
+        }
+        if (provider === 'kiro') {
+          return { method: kiroMethod || 'aws' };
+        }
+        return undefined;
+      })());
       updateProviderState(provider, { url: res.url, state: res.state, status: 'waiting', polling: true });
       if (res.state) {
         startPolling(provider, res.state);
@@ -173,22 +187,25 @@ export function OAuthPage() {
       showNotification(t('auth_login.oauth_callback_required'), 'warning');
       return;
     }
+    const expectedState = (states[provider]?.state || '').trim();
     updateProviderState(provider, {
       callbackSubmitting: true,
       callbackStatus: undefined,
       callbackError: undefined
     });
     try {
-      await oauthApi.submitCallback(provider, redirectUrl);
+      await oauthApi.submitCallback(provider, redirectUrl, expectedState || undefined);
       updateProviderState(provider, { callbackSubmitting: false, callbackStatus: 'success' });
       showNotification(t('auth_login.oauth_callback_success'), 'success');
     } catch (err: any) {
-      const errorMessage =
-        err?.status === 404
-          ? t('auth_login.oauth_callback_upgrade_hint', {
-              defaultValue: 'Please update CLI Proxy API or check the connection.'
-            })
-          : err?.message;
+      const fallbackUpgradeHint = t('auth_login.oauth_callback_upgrade_hint', {
+        defaultValue: 'Please update CLI Proxy API or check the connection.'
+      });
+      const hasUsefulMessage =
+        typeof err?.message === 'string' &&
+        err.message.trim() !== '' &&
+        !/^Request failed with status code 404\b/i.test(err.message.trim());
+      const errorMessage = err?.status === 404 && !hasUsefulMessage ? fallbackUpgradeHint : err?.message;
       updateProviderState(provider, {
         callbackSubmitting: false,
         callbackStatus: 'error',
@@ -305,7 +322,13 @@ export function OAuthPage() {
       <div className={styles.content}>
         {PROVIDERS.map((provider) => {
           const state = states[provider.id] || {};
-          const canSubmitCallback = CALLBACK_SUPPORTED.includes(provider.id) && Boolean(state.url);
+          const canSubmitCallback = shouldShowOAuthCallbackInput(provider.id, state.url);
+          const callbackHintKey =
+            provider.id === 'kiro' ? 'auth_login.oauth_callback_hint_kiro' : 'auth_login.oauth_callback_hint';
+          const callbackPlaceholderKey =
+            provider.id === 'kiro'
+              ? 'auth_login.oauth_callback_placeholder_kiro'
+              : 'auth_login.oauth_callback_placeholder';
           return (
             <div key={provider.id}>
               <Card
@@ -343,6 +366,32 @@ export function OAuthPage() {
                     />
                   </div>
                 )}
+                {provider.id === 'kiro' && (
+                  <div className={styles.geminiProjectField}>
+                    <Input
+                      label={t('auth_login.kiro_method_label')}
+                      hint={t('auth_login.kiro_method_hint')}
+                      value={state.method || 'aws'}
+                      onChange={(e) =>
+                        updateProviderState(provider.id, {
+                          method: e.target.value,
+                          status: undefined,
+                          error: undefined,
+                          url: undefined,
+                          state: undefined,
+                          userCode: undefined
+                        })
+                      }
+                      placeholder="aws / google / github"
+                      list="kiro-method-options"
+                    />
+                    <datalist id="kiro-method-options">
+                      <option value="aws" />
+                      <option value="google" />
+                      <option value="github" />
+                    </datalist>
+                  </div>
+                )}
                 {state.url && (
                   <div className={`connection-box ${styles.authUrlBox}`}>
                     <div className={styles.authUrlLabel}>{t(provider.urlLabelKey)}</div>
@@ -361,11 +410,17 @@ export function OAuthPage() {
                     </div>
                   </div>
                 )}
+                {state.userCode && (
+                  <div className={`connection-box ${styles.authUrlBox}`}>
+                    <div className={styles.authUrlLabel}>{t('auth_login.kiro_device_code_label')}</div>
+                    <div className={styles.authUrlValue}>{state.userCode}</div>
+                  </div>
+                )}
                 {canSubmitCallback && (
                   <div className={styles.callbackSection}>
                     <Input
                       label={t('auth_login.oauth_callback_label')}
-                      hint={t('auth_login.oauth_callback_hint')}
+                      hint={t(callbackHintKey)}
                       value={state.callbackUrl || ''}
                       onChange={(e) =>
                         updateProviderState(provider.id, {
@@ -374,7 +429,7 @@ export function OAuthPage() {
                           callbackError: undefined
                         })
                       }
-                      placeholder={t('auth_login.oauth_callback_placeholder')}
+                      placeholder={t(callbackPlaceholderKey)}
                     />
                     <div className={styles.callbackActions}>
                       <Button

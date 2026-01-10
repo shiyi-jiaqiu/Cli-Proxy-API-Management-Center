@@ -16,9 +16,11 @@ import type {
   CodexUsagePayload,
   GeminiCliParsedBucket,
   GeminiCliQuotaBucketState,
-  GeminiCliQuotaState
+  GeminiCliQuotaState,
+  KiroQuotaState,
+  KiroUsageSnapshot
 } from '@/types';
-import { apiCallApi, getApiCallErrorMessage } from '@/services/api';
+import { apiCallApi, authFilesApi, getApiCallErrorMessage } from '@/services/api';
 import {
   ANTIGRAVITY_QUOTA_URLS,
   ANTIGRAVITY_REQUEST_HEADERS,
@@ -46,6 +48,7 @@ import {
   isAntigravityFile,
   isCodexFile,
   isGeminiCliFile,
+  isKiroFile,
   isRuntimeOnlyAuthFile
 } from '@/utils/quota';
 import type { QuotaRenderHelpers } from './QuotaCard';
@@ -53,15 +56,17 @@ import styles from '@/pages/QuotaPage.module.scss';
 
 type QuotaUpdater<T> = T | ((prev: T) => T);
 
-type QuotaType = 'antigravity' | 'codex' | 'gemini-cli';
+type QuotaType = 'antigravity' | 'codex' | 'gemini-cli' | 'kiro';
 
 export interface QuotaStore {
   antigravityQuota: Record<string, AntigravityQuotaState>;
   codexQuota: Record<string, CodexQuotaState>;
   geminiCliQuota: Record<string, GeminiCliQuotaState>;
+  kiroQuota: Record<string, KiroQuotaState>;
   setAntigravityQuota: (updater: QuotaUpdater<Record<string, AntigravityQuotaState>>) => void;
   setCodexQuota: (updater: QuotaUpdater<Record<string, CodexQuotaState>>) => void;
   setGeminiCliQuota: (updater: QuotaUpdater<Record<string, GeminiCliQuotaState>>) => void;
+  setKiroQuota: (updater: QuotaUpdater<Record<string, KiroQuotaState>>) => void;
   clearQuotaCache: () => void;
 }
 
@@ -304,6 +309,21 @@ const fetchGeminiCliQuota = async (
   return buildGeminiCliQuotaBuckets(parsedBuckets);
 };
 
+const fetchKiroQuota = async (file: AuthFileItem, t: TFunction): Promise<KiroUsageSnapshot> => {
+  const id = typeof file.id === 'string' ? file.id.trim() : '';
+  if (!id) {
+    throw new Error(t('kiro_quota.missing_id'));
+  }
+
+  const result = await authFilesApi.refreshKiroQuota(id);
+  const auth = (result as any)?.auth ?? null;
+  const usage = (auth && typeof auth === 'object' ? (auth as any).kiro_usage : null) ?? file.kiro_usage;
+  if (!usage || typeof usage !== 'object') {
+    throw new Error(t('kiro_quota.empty_usage'));
+  }
+  return usage as KiroUsageSnapshot;
+};
+
 const renderAntigravityItems = (
   quota: AntigravityQuotaState,
   t: TFunction,
@@ -479,6 +499,78 @@ const renderGeminiCliItems = (
   });
 };
 
+const renderKiroItems = (
+  quota: KiroQuotaState,
+  t: TFunction,
+  helpers: QuotaRenderHelpers
+): ReactNode => {
+  const { styles: styleMap, QuotaProgressBar } = helpers;
+  const { createElement: h, Fragment } = React;
+
+  const nodes: ReactNode[] = [];
+
+  if (quota.subscriptionType) {
+    nodes.push(
+      h(
+        'div',
+        { key: 'subscription', className: styleMap.codexPlan },
+        h('span', { className: styleMap.codexPlanLabel }, t('kiro_quota.subscription_label')),
+        h('span', { className: styleMap.codexPlanValue }, quota.subscriptionType)
+      )
+    );
+  }
+
+  if (quota.daysUntilReset !== null && quota.daysUntilReset !== undefined) {
+    nodes.push(
+      h(
+        'div',
+        { key: 'reset', className: styleMap.quotaWarning },
+        t('kiro_quota.reset_in_days', { count: quota.daysUntilReset })
+      )
+    );
+  }
+
+  const breakdowns = quota.breakdowns ?? [];
+  if (breakdowns.length === 0) {
+    nodes.push(
+      h('div', { key: 'empty', className: styleMap.quotaMessage }, t('kiro_quota.empty_usage'))
+    );
+    return h(Fragment, null, ...nodes);
+  }
+
+  nodes.push(
+    ...breakdowns.map((item) => {
+      const usedPercent = item.usedPercent;
+      const clampedUsed = usedPercent === null ? null : Math.max(0, Math.min(100, usedPercent));
+      const remaining = clampedUsed === null ? null : Math.max(0, Math.min(100, 100 - clampedUsed));
+      const percentLabel = remaining === null ? '--' : `${Math.round(remaining)}%`;
+      const usageLabel =
+        item.currentUsage !== null && item.usageLimit !== null
+          ? `${item.currentUsage}/${item.usageLimit}`
+          : null;
+
+      return h(
+        'div',
+        { key: item.id, className: styleMap.quotaRow },
+        h(
+          'div',
+          { className: styleMap.quotaRowHeader },
+          h('span', { className: styleMap.quotaModel }, item.label),
+          h(
+            'div',
+            { className: styleMap.quotaMeta },
+            h('span', { className: styleMap.quotaPercent }, percentLabel),
+            usageLabel ? h('span', { className: styleMap.quotaAmount }, usageLabel) : null
+          )
+        ),
+        h(QuotaProgressBar, { percent: remaining, highThreshold: 80, mediumThreshold: 50 })
+      );
+    })
+  );
+
+  return h(Fragment, null, ...nodes);
+};
+
 export const ANTIGRAVITY_CONFIG: QuotaConfig<AntigravityQuotaState, AntigravityQuotaGroup[]> = {
   type: 'antigravity',
   i18nPrefix: 'antigravity_quota',
@@ -550,4 +642,55 @@ export const GEMINI_CLI_CONFIG: QuotaConfig<GeminiCliQuotaState, GeminiCliQuotaB
   controlClassName: styles.geminiCliControl,
   gridClassName: styles.geminiCliGrid,
   renderQuotaItems: renderGeminiCliItems
+};
+
+export const KIRO_CONFIG: QuotaConfig<KiroQuotaState, KiroUsageSnapshot> = {
+  type: 'kiro',
+  i18nPrefix: 'kiro_quota',
+  filterFn: (file) => isKiroFile(file) && !isRuntimeOnlyAuthFile(file),
+  fetchQuota: fetchKiroQuota,
+  storeSelector: (state) => state.kiroQuota,
+  storeSetter: 'setKiroQuota',
+  buildLoadingState: () => ({ status: 'loading', breakdowns: [] }),
+  buildSuccessState: (data) => {
+    const subscriptionType = data.subscription?.type ?? null;
+    const daysUntilReset =
+      typeof data.days_until_reset === 'number' && Number.isFinite(data.days_until_reset)
+        ? data.days_until_reset
+        : null;
+
+    const breakdowns = Array.isArray(data.breakdowns)
+      ? data.breakdowns.map((item, idx) => {
+          const limit = typeof item.usage_limit === 'number' ? item.usage_limit : null;
+          const used = typeof item.current_usage === 'number' ? item.current_usage : null;
+          const usedPercent = limit !== null && used !== null && limit > 0 ? (used / limit) * 100 : null;
+          const label = item.resource_type || item.unit || `usage-${idx + 1}`;
+          return {
+            id: `${label}-${idx}`,
+            label,
+            usedPercent,
+            currentUsage: used,
+            usageLimit: limit
+          };
+        })
+      : [];
+
+    return {
+      status: 'success',
+      subscriptionType,
+      daysUntilReset,
+      breakdowns
+    };
+  },
+  buildErrorState: (message, status) => ({
+    status: 'error',
+    breakdowns: [],
+    error: message,
+    errorStatus: status
+  }),
+  cardClassName: styles.codexCard,
+  controlsClassName: styles.codexControls,
+  controlClassName: styles.codexControl,
+  gridClassName: styles.codexGrid,
+  renderQuotaItems: renderKiroItems
 };

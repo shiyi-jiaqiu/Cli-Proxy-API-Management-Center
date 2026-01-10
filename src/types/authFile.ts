@@ -11,10 +11,26 @@ export type AuthFileType =
   | 'claude'
   | 'codex'
   | 'antigravity'
+  | 'kiro'
   | 'iflow'
   | 'vertex'
   | 'empty'
   | 'unknown';
+
+export interface KiroUsageBreakdown {
+  resource_type?: string;
+  unit?: string;
+  usage_limit?: number;
+  current_usage?: number;
+}
+
+export interface KiroUsageSnapshot {
+  days_until_reset?: number;
+  next_date_reset?: number;
+  subscription?: { title?: string; type?: string };
+  user_info?: { email?: string; user_id?: string };
+  breakdowns?: KiroUsageBreakdown[];
+}
 
 export interface CodexQuota {
   plan_type?: string;
@@ -67,6 +83,7 @@ export interface AuthFileItem {
   quota?: QuotaState;
   codex_quota?: CodexQuota;
   antigravity_quota?: AntigravityQuota;
+  kiro_usage?: KiroUsageSnapshot;
   [key: string]: any;
 }
 

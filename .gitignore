@@ -19,6 +19,9 @@ dist
 dist-ssr
 *.local
 
+# Git worktrees
+.worktrees
+
 # Editor directories and files
 settings.local.json
 .vscode/*
